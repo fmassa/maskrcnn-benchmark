@@ -34,7 +34,7 @@ class KeypointPostProcessor(nn.Module):
 
 # TODO remove and use only the Keypointer
 import numpy as np
-import cv2
+
 
 
 def heatmaps_to_keypoints(maps, rois):
@@ -42,6 +42,7 @@ def heatmaps_to_keypoints(maps, rois):
     (#rois, 4, #keypoints) with the 4 rows corresponding to (x, y, logit, prob)
     for each keypoint.
     """
+    import cv2
     # This function converts a discrete image coordinate in a HEATMAP_SIZE x
     # HEATMAP_SIZE image to a continuous keypoint coordinate. We maintain
     # consistency with keypoints_to_heatmap_labels by using the conversion from

@@ -34,14 +34,13 @@ def keep_only_positive_boxes(boxes):
 
 
 class ROIMaskHead(torch.nn.Module):
-    def __init__(self, cfg, in_channels):
+    def __init__(self, feature_extractor, predictor, post_processor, loss_evaluator, share_box_feature_extractor):
         super(ROIMaskHead, self).__init__()
-        self.cfg = cfg.clone()
-        self.feature_extractor = make_roi_mask_feature_extractor(cfg, in_channels)
-        self.predictor = make_roi_mask_predictor(
-            cfg, self.feature_extractor.out_channels)
-        self.post_processor = make_roi_mask_post_processor(cfg)
-        self.loss_evaluator = make_roi_mask_loss_evaluator(cfg)
+        self.feature_extractor = feature_extractor
+        self.predictor = predictor
+        self.post_processor = post_processor
+        self.loss_evaluator = loss_evaluator
+        self.share_box_feature_extractor = share_box_feature_extractor
 
     def forward(self, features, proposals, targets=None):
         """
@@ -63,7 +62,7 @@ class ROIMaskHead(torch.nn.Module):
             # during training, only focus on positive boxes
             all_proposals = proposals
             proposals, positive_inds = keep_only_positive_boxes(proposals)
-        if self.training and self.cfg.MODEL.ROI_MASK_HEAD.SHARE_BOX_FEATURE_EXTRACTOR:
+        if self.training and self.share_box_feature_extractor:
             x = features
             x = x[torch.cat(positive_inds, dim=0)]
         else:
@@ -80,4 +79,11 @@ class ROIMaskHead(torch.nn.Module):
 
 
 def build_roi_mask_head(cfg, in_channels):
-    return ROIMaskHead(cfg, in_channels)
+
+    feature_extractor = make_roi_mask_feature_extractor(cfg, in_channels)
+    predictor = make_roi_mask_predictor(
+        cfg, feature_extractor.out_channels)
+    post_processor = make_roi_mask_post_processor(cfg)
+    loss_evaluator = make_roi_mask_loss_evaluator(cfg)
+    return ROIMaskHead(feature_extractor, predictor, post_processor, loss_evaluator,
+            cfg.MODEL.ROI_MASK_HEAD.SHARE_BOX_FEATURE_EXTRACTOR)

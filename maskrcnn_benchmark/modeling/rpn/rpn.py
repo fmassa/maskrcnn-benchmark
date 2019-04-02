@@ -11,64 +11,6 @@ from .anchor_generator import make_anchor_generator
 from .inference import make_rpn_postprocessor
 
 
-class RPNHeadConvRegressor(nn.Module):
-    """
-    A simple RPN Head for classification and bbox regression
-    """
-
-    def __init__(self, cfg, in_channels, num_anchors):
-        """
-        Arguments:
-            cfg              : config
-            in_channels (int): number of channels of the input feature
-            num_anchors (int): number of anchors to be predicted
-        """
-        super(RPNHeadConvRegressor, self).__init__()
-        self.cls_logits = nn.Conv2d(in_channels, num_anchors, kernel_size=1, stride=1)
-        self.bbox_pred = nn.Conv2d(
-            in_channels, num_anchors * 4, kernel_size=1, stride=1
-        )
-
-        for l in [self.cls_logits, self.bbox_pred]:
-            torch.nn.init.normal_(l.weight, std=0.01)
-            torch.nn.init.constant_(l.bias, 0)
-
-    def forward(self, x):
-        assert isinstance(x, (list, tuple))
-        logits = [self.cls_logits(y) for y in x]
-        bbox_reg = [self.bbox_pred(y) for y in x]
-
-        return logits, bbox_reg
-
-
-class RPNHeadFeatureSingleConv(nn.Module):
-    """
-    Adds a simple RPN Head with one conv to extract the feature
-    """
-
-    def __init__(self, cfg, in_channels):
-        """
-        Arguments:
-            cfg              : config
-            in_channels (int): number of channels of the input feature
-        """
-        super(RPNHeadFeatureSingleConv, self).__init__()
-        self.conv = nn.Conv2d(
-            in_channels, in_channels, kernel_size=3, stride=1, padding=1
-        )
-
-        for l in [self.conv]:
-            torch.nn.init.normal_(l.weight, std=0.01)
-            torch.nn.init.constant_(l.bias, 0)
-
-        self.out_channels = in_channels
-
-    def forward(self, x):
-        assert isinstance(x, (list, tuple))
-        x = [F.relu(self.conv(z)) for z in x]
-
-        return x
-
 
 @registry.RPN_HEADS.register("SingleConvRPNHead")
 class RPNHead(nn.Module):
@@ -76,10 +18,9 @@ class RPNHead(nn.Module):
     Adds a simple RPN Head with classification and regression heads
     """
 
-    def __init__(self, cfg, in_channels, num_anchors):
+    def __init__(self, in_channels, num_anchors):
         """
         Arguments:
-            cfg              : config
             in_channels (int): number of channels of the input feature
             num_anchors (int): number of anchors to be predicted
         """
@@ -112,30 +53,15 @@ class RPNModule(torch.nn.Module):
     proposals and losses. Works for both FPN and non-FPN.
     """
 
-    def __init__(self, cfg, in_channels):
+    def __init__(self, anchor_generator, head, box_selector_train, box_selector_test, loss_evaluator, rpn_only):
         super(RPNModule, self).__init__()
-
-        self.cfg = cfg.clone()
-
-        anchor_generator = make_anchor_generator(cfg)
-
-        rpn_head = registry.RPN_HEADS[cfg.MODEL.RPN.RPN_HEAD]
-        head = rpn_head(
-            cfg, in_channels, anchor_generator.num_anchors_per_location()[0]
-        )
-
-        rpn_box_coder = BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
-
-        box_selector_train = make_rpn_postprocessor(cfg, rpn_box_coder, is_train=True)
-        box_selector_test = make_rpn_postprocessor(cfg, rpn_box_coder, is_train=False)
-
-        loss_evaluator = make_rpn_loss_evaluator(cfg, rpn_box_coder)
 
         self.anchor_generator = anchor_generator
         self.head = head
         self.box_selector_train = box_selector_train
         self.box_selector_test = box_selector_test
         self.loss_evaluator = loss_evaluator
+        self.rpn_only = rpn_only
 
     def forward(self, images, features, targets=None):
         """
@@ -161,7 +87,7 @@ class RPNModule(torch.nn.Module):
             return self._forward_test(anchors, objectness, rpn_box_regression)
 
     def _forward_train(self, anchors, objectness, rpn_box_regression, targets):
-        if self.cfg.MODEL.RPN_ONLY:
+        if self.rpn_only:
             # When training an RPN-only model, the loss is determined by the
             # predicted objectness and rpn_box_regression values and there is
             # no need to transform the anchors into predicted boxes; this is an
@@ -185,7 +111,7 @@ class RPNModule(torch.nn.Module):
 
     def _forward_test(self, anchors, objectness, rpn_box_regression):
         boxes = self.box_selector_test(anchors, objectness, rpn_box_regression)
-        if self.cfg.MODEL.RPN_ONLY:
+        if self.rpn_only:
             # For end-to-end models, the RPN proposals are an intermediate state
             # and don't bother to sort them in decreasing score order. For RPN-only
             # models, the proposals are the final output and we return them in
@@ -204,4 +130,19 @@ def build_rpn(cfg, in_channels):
     if cfg.MODEL.RETINANET_ON:
         return build_retinanet(cfg, in_channels)
 
-    return RPNModule(cfg, in_channels)
+
+    anchor_generator = make_anchor_generator(cfg)
+
+    rpn_head = registry.RPN_HEADS[cfg.MODEL.RPN.RPN_HEAD]
+    head = rpn_head(
+        in_channels, anchor_generator.num_anchors_per_location()[0]
+    )
+
+    rpn_box_coder = BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
+
+    box_selector_train = make_rpn_postprocessor(cfg, rpn_box_coder, is_train=True)
+    box_selector_test = make_rpn_postprocessor(cfg, rpn_box_coder, is_train=False)
+
+    loss_evaluator = make_rpn_loss_evaluator(cfg, rpn_box_coder)
+
+    return RPNModule(anchor_generator, head, box_selector_train, box_selector_test, loss_evaluator, cfg.MODEL.RPN_ONLY)

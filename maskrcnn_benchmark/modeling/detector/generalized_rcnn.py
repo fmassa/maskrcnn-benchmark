@@ -8,10 +8,6 @@ from torch import nn
 
 from maskrcnn_benchmark.structures.image_list import to_image_list
 
-from ..backbone import build_backbone
-from ..rpn.rpn import build_rpn
-from ..roi_heads.roi_heads import build_roi_heads
-
 
 class GeneralizedRCNN(nn.Module):
     """
@@ -23,12 +19,12 @@ class GeneralizedRCNN(nn.Module):
         detections / masks from it.
     """
 
-    def __init__(self, cfg):
+    def __init__(self, backbone, rpn, roi_heads):
         super(GeneralizedRCNN, self).__init__()
 
-        self.backbone = build_backbone(cfg)
-        self.rpn = build_rpn(cfg, self.backbone.out_channels)
-        self.roi_heads = build_roi_heads(cfg, self.backbone.out_channels)
+        self.backbone = backbone
+        self.rpn = rpn
+        self.roi_heads = roi_heads
 
     def forward(self, images, targets=None):
         """

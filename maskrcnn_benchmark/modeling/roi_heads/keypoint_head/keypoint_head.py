@@ -7,14 +7,12 @@ from .loss import make_roi_keypoint_loss_evaluator
 
 
 class ROIKeypointHead(torch.nn.Module):
-    def __init__(self, cfg, in_channels):
+    def __init__(self, feature_extractor, predictor, post_processor, loss_evaluator):
         super(ROIKeypointHead, self).__init__()
-        self.cfg = cfg.clone()
-        self.feature_extractor = make_roi_keypoint_feature_extractor(cfg, in_channels)
-        self.predictor = make_roi_keypoint_predictor(
-            cfg, self.feature_extractor.out_channels)
-        self.post_processor = make_roi_keypoint_post_processor(cfg)
-        self.loss_evaluator = make_roi_keypoint_loss_evaluator(cfg)
+        self.feature_extractor = feature_extractor
+        self.predictor = predictor
+        self.post_processor = post_processor
+        self.loss_evaluator = loss_evaluator
 
     def forward(self, features, proposals, targets=None):
         """
@@ -48,4 +46,9 @@ class ROIKeypointHead(torch.nn.Module):
 
 
 def build_roi_keypoint_head(cfg, in_channels):
-    return ROIKeypointHead(cfg, in_channels)
+    feature_extractor = make_roi_keypoint_feature_extractor(cfg, in_channels)
+    predictor = make_roi_keypoint_predictor(
+        cfg, feature_extractor.out_channels)
+    post_processor = make_roi_keypoint_post_processor(cfg)
+    loss_evaluator = make_roi_keypoint_loss_evaluator(cfg)
+    return ROIKeypointHead(feature_extractor, predictor, post_processor, loss_evaluator)
