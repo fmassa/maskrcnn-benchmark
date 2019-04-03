@@ -111,15 +111,6 @@ class RPNModule(torch.nn.Module):
 
     def _forward_test(self, anchors, objectness, rpn_box_regression):
         boxes = self.box_selector_test(anchors, objectness, rpn_box_regression)
-        if self.rpn_only:
-            # For end-to-end models, the RPN proposals are an intermediate state
-            # and don't bother to sort them in decreasing score order. For RPN-only
-            # models, the proposals are the final output and we return them in
-            # high-to-low confidence order.
-            inds = [
-                box.get_field("objectness").sort(descending=True)[1] for box in boxes
-            ]
-            boxes = [box[ind] for box, ind in zip(boxes, inds)]
         return boxes, {}
 
 
