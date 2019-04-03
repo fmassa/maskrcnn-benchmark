@@ -121,7 +121,7 @@ def paste_mask_in_image(mask, box, im_h, im_w, thresh=0.5, padding=1):
     box = expand_boxes(box[None], scale)[0]
     box = box.to(dtype=torch.int32)
 
-    TO_REMOVE = 1
+    TO_REMOVE = 0  # TODO check if should be 1
     w = int(box[2] - box[0] + TO_REMOVE)
     h = int(box[3] - box[1] + TO_REMOVE)
     w = max(w, 1)

@@ -29,14 +29,13 @@ class BoxCoder(object):
             proposals (Tensor): boxes to be encoded
         """
 
-        TO_REMOVE = 1  # TODO remove
-        ex_widths = proposals[:, 2] - proposals[:, 0] + TO_REMOVE
-        ex_heights = proposals[:, 3] - proposals[:, 1] + TO_REMOVE
+        ex_widths = proposals[:, 2] - proposals[:, 0]
+        ex_heights = proposals[:, 3] - proposals[:, 1]
         ex_ctr_x = proposals[:, 0] + 0.5 * ex_widths
         ex_ctr_y = proposals[:, 1] + 0.5 * ex_heights
 
-        gt_widths = reference_boxes[:, 2] - reference_boxes[:, 0] + TO_REMOVE
-        gt_heights = reference_boxes[:, 3] - reference_boxes[:, 1] + TO_REMOVE
+        gt_widths = reference_boxes[:, 2] - reference_boxes[:, 0]
+        gt_heights = reference_boxes[:, 3] - reference_boxes[:, 1]
         gt_ctr_x = reference_boxes[:, 0] + 0.5 * gt_widths
         gt_ctr_y = reference_boxes[:, 1] + 0.5 * gt_heights
 
@@ -61,9 +60,8 @@ class BoxCoder(object):
 
         boxes = boxes.to(rel_codes.dtype)
 
-        TO_REMOVE = 1  # TODO remove
-        widths = boxes[:, 2] - boxes[:, 0] + TO_REMOVE
-        heights = boxes[:, 3] - boxes[:, 1] + TO_REMOVE
+        widths = boxes[:, 2] - boxes[:, 0]
+        heights = boxes[:, 3] - boxes[:, 1]
         ctr_x = boxes[:, 0] + 0.5 * widths
         ctr_y = boxes[:, 1] + 0.5 * heights
 
@@ -87,9 +85,9 @@ class BoxCoder(object):
         pred_boxes[:, 0::4] = pred_ctr_x - 0.5 * pred_w
         # y1
         pred_boxes[:, 1::4] = pred_ctr_y - 0.5 * pred_h
-        # x2 (note: "- 1" is correct; don't be fooled by the asymmetry)
-        pred_boxes[:, 2::4] = pred_ctr_x + 0.5 * pred_w - 1
-        # y2 (note: "- 1" is correct; don't be fooled by the asymmetry)
-        pred_boxes[:, 3::4] = pred_ctr_y + 0.5 * pred_h - 1
+        # x2
+        pred_boxes[:, 2::4] = pred_ctr_x + 0.5 * pred_w
+        # y2
+        pred_boxes[:, 3::4] = pred_ctr_y + 0.5 * pred_h
 
         return pred_boxes

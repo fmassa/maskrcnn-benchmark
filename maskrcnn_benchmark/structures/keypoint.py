@@ -45,9 +45,8 @@ class Keypoints(object):
         flip_inds = type(self).FLIP_INDS
         flipped_data = self.keypoints[:, flip_inds]
         width = self.size[0]
-        TO_REMOVE = 1
         # Flip x coordinates
-        flipped_data[..., 0] = width - flipped_data[..., 0] - TO_REMOVE
+        flipped_data[..., 0] = width - flipped_data[..., 0]
 
         # Maintain COCO convention that if visibility == 0, then x, y = 0
         inds = flipped_data[..., 2] == 0

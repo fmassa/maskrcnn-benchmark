@@ -64,9 +64,8 @@ class BoxList(object):
             bbox = torch.cat((xmin, ymin, xmax, ymax), dim=-1)
             bbox = BoxList(bbox, self.size, mode=mode)
         else:
-            TO_REMOVE = 1
             bbox = torch.cat(
-                (xmin, ymin, xmax - xmin + TO_REMOVE, ymax - ymin + TO_REMOVE), dim=-1
+                (xmin, ymin, xmax - xmin, ymax - ymin), dim=-1
             )
             bbox = BoxList(bbox, self.size, mode=mode)
         bbox._copy_extra_fields(self)
@@ -77,13 +76,12 @@ class BoxList(object):
             xmin, ymin, xmax, ymax = self.bbox.split(1, dim=-1)
             return xmin, ymin, xmax, ymax
         elif self.mode == "xywh":
-            TO_REMOVE = 1
             xmin, ymin, w, h = self.bbox.split(1, dim=-1)
             return (
                 xmin,
                 ymin,
-                xmin + (w - TO_REMOVE).clamp(min=0),
-                ymin + (h - TO_REMOVE).clamp(min=0),
+                xmin + w.clamp(min=0),
+                ymin + h.clamp(min=0),
             )
         else:
             raise RuntimeError("Should not be here")
@@ -142,9 +140,8 @@ class BoxList(object):
         image_width, image_height = self.size
         xmin, ymin, xmax, ymax = self._split_into_xyxy()
         if method == FLIP_LEFT_RIGHT:
-            TO_REMOVE = 1
-            transposed_xmin = image_width - xmax - TO_REMOVE
-            transposed_xmax = image_width - xmin - TO_REMOVE
+            transposed_xmin = image_width - xmax
+            transposed_xmax = image_width - xmin
             transposed_ymin = ymin
             transposed_ymax = ymax
         elif method == FLIP_TOP_BOTTOM:
@@ -212,11 +209,10 @@ class BoxList(object):
         return self.bbox.shape[0]
 
     def clip_to_image(self, remove_empty=True):
-        TO_REMOVE = 1
-        self.bbox[:, 0].clamp_(min=0, max=self.size[0] - TO_REMOVE)
-        self.bbox[:, 1].clamp_(min=0, max=self.size[1] - TO_REMOVE)
-        self.bbox[:, 2].clamp_(min=0, max=self.size[0] - TO_REMOVE)
-        self.bbox[:, 3].clamp_(min=0, max=self.size[1] - TO_REMOVE)
+        self.bbox[:, 0].clamp_(min=0, max=self.size[0])
+        self.bbox[:, 1].clamp_(min=0, max=self.size[1])
+        self.bbox[:, 2].clamp_(min=0, max=self.size[0])
+        self.bbox[:, 3].clamp_(min=0, max=self.size[1])
         if remove_empty:
             box = self.bbox
             keep = (box[:, 3] > box[:, 1]) & (box[:, 2] > box[:, 0])
@@ -226,8 +222,7 @@ class BoxList(object):
     def area(self):
         box = self.bbox
         if self.mode == "xyxy":
-            TO_REMOVE = 1
-            area = (box[:, 2] - box[:, 0] + TO_REMOVE) * (box[:, 3] - box[:, 1] + TO_REMOVE)
+            area = (box[:, 2] - box[:, 0]) * (box[:, 3] - box[:, 1])
         elif self.mode == "xywh":
             area = box[:, 2] * box[:, 3]
         else:
