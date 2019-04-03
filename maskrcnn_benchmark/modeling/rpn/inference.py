@@ -151,31 +151,13 @@ class RPNPostProcessor(torch.nn.Module):
 
     def select_over_all_levels(self, boxlists):
         num_images = len(boxlists)
-        # different behavior during training and during testing:
-        # during training, post_nms_top_n is over *all* the proposals combined, while
-        # during testing, it is over the proposals for each image
-        # TODO resolve this difference and make it consistent. It should be per image,
-        # and not per batch
-        if self.training:
-            objectness = torch.cat(
-                [boxlist.get_field("objectness") for boxlist in boxlists], dim=0
-            )
-            box_sizes = [len(boxlist) for boxlist in boxlists]
+        for i in range(num_images):
+            objectness = boxlists[i].get_field("objectness")
             post_nms_top_n = min(self.fpn_post_nms_top_n, len(objectness))
-            _, inds_sorted = torch.topk(objectness, post_nms_top_n, dim=0, sorted=True)
-            inds_mask = torch.zeros_like(objectness, dtype=torch.uint8)
-            inds_mask[inds_sorted] = 1
-            inds_mask = inds_mask.split(box_sizes)
-            for i in range(num_images):
-                boxlists[i] = boxlists[i][inds_mask[i]]
-        else:
-            for i in range(num_images):
-                objectness = boxlists[i].get_field("objectness")
-                post_nms_top_n = min(self.fpn_post_nms_top_n, len(objectness))
-                _, inds_sorted = torch.topk(
-                    objectness, post_nms_top_n, dim=0, sorted=True
-                )
-                boxlists[i] = boxlists[i][inds_sorted]
+            _, inds_sorted = torch.topk(
+                objectness, post_nms_top_n, dim=0, sorted=True
+            )
+            boxlists[i] = boxlists[i][inds_sorted]
         return boxlists
 
 
