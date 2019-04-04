@@ -47,7 +47,7 @@ class CombinedROIHeads(torch.nn.ModuleDict):
         else:
             result = self.box.post_processor((class_logits, box_regression), proposals)
             if 'mask' in self:
-                x = self.mask.feature_extractor(features, proposals)
+                x = self.mask.feature_extractor(features, result)
                 mask_logits = self.mask.predictor(x)
                 result = self.mask.post_processor(mask_logits, result)
             return x, result, {}
