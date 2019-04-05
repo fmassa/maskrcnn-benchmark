@@ -52,20 +52,20 @@ class FPN2MLPFeatureExtractor(nn.Module):
     Heads for FPN for classification
     """
 
-    def __init__(self, cfg, in_channels):
+    def __init__(self,
+            # pooler
+            resolution, scales, sampling_ratio,
+            # head
+            in_channels, representation_size, use_gn
+            ):
         super(FPN2MLPFeatureExtractor, self).__init__()
 
-        resolution = cfg.MODEL.ROI_BOX_HEAD.POOLER_RESOLUTION
-        scales = cfg.MODEL.ROI_BOX_HEAD.POOLER_SCALES
-        sampling_ratio = cfg.MODEL.ROI_BOX_HEAD.POOLER_SAMPLING_RATIO
         pooler = Pooler(
             output_size=(resolution, resolution),
             scales=scales,
             sampling_ratio=sampling_ratio,
         )
         input_size = in_channels * resolution ** 2
-        representation_size = cfg.MODEL.ROI_BOX_HEAD.MLP_HEAD_DIM
-        use_gn = cfg.MODEL.ROI_BOX_HEAD.USE_GN
         self.pooler = pooler
         self.fc6 = make_fc(input_size, representation_size, use_gn)
         self.fc7 = make_fc(representation_size, representation_size, use_gn)

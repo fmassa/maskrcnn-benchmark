@@ -5,57 +5,62 @@ from torch.nn import functional as F
 from maskrcnn_benchmark.layers import smooth_l1_loss
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 from maskrcnn_benchmark.modeling.matcher import Matcher
-from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
+from maskrcnn_benchmark.modeling.assign_target_to_proposal import Target2ProposalAssigner
+
 from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
     BalancedPositiveNegativeSampler
 )
 from maskrcnn_benchmark.modeling.utils import cat
 
 
-class ProposalLabeler(object):
-    def __init__(self, proposal_matcher, fields_to_keep):
-        self.box_similarity = boxlist_iou
-        self.proposal_matcher = proposal_matcher
-        self.fields_to_keep = fields_to_keep
+def fastrcnn_subsample_proposals(proposals, targets, assign_target_to_proposal, sampler):
+    """
+    This method performs the positive/negative sampling, and return
+    the sampled proposals.
 
-    def match_targets_to_proposals(self, proposal, target):
-        match_quality_matrix = self.box_similarity(target, proposal)
-        matched_idxs = self.proposal_matcher(match_quality_matrix)
-        # Fast RCNN only need "labels" field for selecting the targets
-        target = target.copy_with_fields(self.fields_to_keep)
-        # get the targets corresponding GT for each proposal
-        # NB: need to clamp the indices because we can have a single
-        # GT in the image, and matched_idxs can be -2, which goes
-        # out of bounds
-        matched_targets = target[matched_idxs.clamp(min=0)]
-        matched_targets.add_field("matched_idxs", matched_idxs)
-        return matched_targets
+    Arguments:
+        proposals (list[BoxList])
+        targets (list[BoxList])
+    """
+    aligned_targets = assign_target_to_proposal(proposals, targets)
 
-    def prepare_targets(self, proposals, targets):
-        aligned_targets = []
-        for proposals_per_image, targets_per_image in zip(proposals, targets):
-            matched_targets = self.match_targets_to_proposals(
-                proposals_per_image, targets_per_image
-            )
-            matched_idxs = matched_targets.get_field("matched_idxs")
+    proposals = list(proposals)
+    for aligned_targets_per_image, proposals_per_image in zip(
+        aligned_targets, proposals
+    ):
+        matched_idxs = aligned_targets_per_image.get_field("matched_idxs")
 
-            labels_per_image = matched_targets.get_field("labels")
-            labels_per_image = labels_per_image.to(dtype=torch.int64)
+        labels_per_image = aligned_targets_per_image.get_field("labels")
+        labels_per_image = labels_per_image.to(dtype=torch.int64)
 
-            # Label background (below the low threshold)
-            bg_inds = matched_idxs == Matcher.BELOW_LOW_THRESHOLD
-            labels_per_image[bg_inds] = 0
+        # Label background (below the low threshold)
+        bg_inds = matched_idxs == Matcher.BELOW_LOW_THRESHOLD
+        labels_per_image[bg_inds] = 0
 
-            # Label ignore proposals (between low and high thresholds)
-            ignore_inds = matched_idxs == Matcher.BETWEEN_THRESHOLDS
-            labels_per_image[ignore_inds] = -1  # -1 is ignored by sampler
+        # Label ignore proposals (between low and high thresholds)
+        ignore_inds = matched_idxs == Matcher.BETWEEN_THRESHOLDS
+        labels_per_image[ignore_inds] = -1  # -1 is ignored by sampler
 
-            matched_targets.add_field("labels", labels_per_image)
+        proposals_per_image.add_field("labels", labels_per_image)
+        regression_targets_per_image = self.box_coder.encode(aligned_targets_per_image.bbox, proposals_per_image.bbox)
+        proposals_per_image.add_field(
+            "regression_targets", regression_targets_per_image
+        )
 
-            aligned_targets.append(matched_targets)
+    labels = [p.get_field('labels') for p in proposals]
+    sampled_pos_inds, sampled_neg_inds = sampler(labels)
 
-        return aligned_targets
+    # distributed sampled proposals, that were obtained on all feature maps
+    # concatenated via the fg_bg_sampler, into individual feature map levels
+    for img_idx, (pos_inds_img, neg_inds_img) in enumerate(
+        zip(sampled_pos_inds, sampled_neg_inds)
+    ):
+        img_sampled_inds = torch.nonzero(pos_inds_img | neg_inds_img).squeeze(1)
+        proposals_per_image = proposals[img_idx][img_sampled_inds]
+        proposals[img_idx] = proposals_per_image
+        # aligned_targets[img_idx] = aligned_targets[img_idx][img_sampled_inds]
 
+    return proposals
 
 class FastRCNNLossComputation(object):
     """
@@ -76,7 +81,7 @@ class FastRCNNLossComputation(object):
             fg_bg_sampler (BalancedPositiveNegativeSampler)
             box_coder (BoxCoder)
         """
-        self.proposal_labeler = ProposalLabeler(proposal_matcher, ['labels'])
+        self.assign_target_to_proposal = Target2ProposalAssigner(proposal_matcher, ['labels'])
         self.fg_bg_sampler = fg_bg_sampler
         self.box_coder = box_coder
         self.cls_agnostic_bbox_reg = cls_agnostic_bbox_reg
@@ -85,26 +90,39 @@ class FastRCNNLossComputation(object):
         """
         This method performs the positive/negative sampling, and return
         the sampled proposals.
-        Note: this function keeps a state.
 
         Arguments:
             proposals (list[BoxList])
             targets (list[BoxList])
         """
 
-        aligned_targets = self.proposal_labeler.prepare_targets(proposals, targets)
-        labels = [a.get_field('labels') for a in aligned_targets]
-        sampled_pos_inds, sampled_neg_inds = self.fg_bg_sampler(labels)
+        aligned_targets = self.assign_target_to_proposal(proposals, targets)
 
         proposals = list(proposals)
-        for labels_per_image, aligned_targets_per_image, proposals_per_image in zip(
-            labels, aligned_targets, proposals
+        for aligned_targets_per_image, proposals_per_image in zip(
+            aligned_targets, proposals
         ):
+            matched_idxs = aligned_targets_per_image.get_field("matched_idxs")
+
+            labels_per_image = aligned_targets_per_image.get_field("labels")
+            labels_per_image = labels_per_image.to(dtype=torch.int64)
+
+            # Label background (below the low threshold)
+            bg_inds = matched_idxs == Matcher.BELOW_LOW_THRESHOLD
+            labels_per_image[bg_inds] = 0
+
+            # Label ignore proposals (between low and high thresholds)
+            ignore_inds = matched_idxs == Matcher.BETWEEN_THRESHOLDS
+            labels_per_image[ignore_inds] = -1  # -1 is ignored by sampler
+
             proposals_per_image.add_field("labels", labels_per_image)
             regression_targets_per_image = self.box_coder.encode(aligned_targets_per_image.bbox, proposals_per_image.bbox)
             proposals_per_image.add_field(
                 "regression_targets", regression_targets_per_image
             )
+
+        labels = [p.get_field('labels') for p in proposals]
+        sampled_pos_inds, sampled_neg_inds = self.fg_bg_sampler(labels)
 
         # distributed sampled proposals, that were obtained on all feature maps
         # concatenated via the fg_bg_sampler, into individual feature map levels
@@ -114,6 +132,7 @@ class FastRCNNLossComputation(object):
             img_sampled_inds = torch.nonzero(pos_inds_img | neg_inds_img).squeeze(1)
             proposals_per_image = proposals[img_idx][img_sampled_inds]
             proposals[img_idx] = proposals_per_image
+            # aligned_targets[img_idx] = aligned_targets[img_idx][img_sampled_inds]
 
         return proposals
 
