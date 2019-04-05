@@ -43,12 +43,16 @@ def build_roi_box_head(cfg, in_channels):
     batch_size_per_image = cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE
     positive_fraction = cfg.MODEL.ROI_HEADS.POSITIVE_FRACTION
 
-    feature_extractor = FPN2MLPFeatureExtractor(resolution, scales, sampling_ratio, in_channels, representation_size, use_gn)
-
     roi_box_head = ROIBoxHead(
-        feature_extractor,
+        FPN2MLPFeatureExtractor(
+            resolution,
+            scales,
+            sampling_ratio,
+            in_channels,
+            representation_size,
+            use_gn),
         FPNPredictor(
-            feature_extractor.out_channels,
+            representation_size,
             num_classes,
             cls_agnostic_bbox_reg),
         PostProcessor(
