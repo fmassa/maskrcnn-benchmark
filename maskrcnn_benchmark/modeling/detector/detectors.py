@@ -75,10 +75,57 @@ def build_roi_box_head(cfg, in_channels):
 
     return roi_box_head
 
+def build_roi_heads(cfg, in_channels):
+    from ..roi_heads.roi_heads2 import FPN2MLPFeatureExtractor, FPNPredictor
+    resolution = cfg.MODEL.ROI_BOX_HEAD.POOLER_RESOLUTION
+    scales = cfg.MODEL.ROI_BOX_HEAD.POOLER_SCALES
+    sampling_ratio = cfg.MODEL.ROI_BOX_HEAD.POOLER_SAMPLING_RATIO
+    representation_size = cfg.MODEL.ROI_BOX_HEAD.MLP_HEAD_DIM
+    use_gn = cfg.MODEL.ROI_BOX_HEAD.USE_GN
+
+    num_classes = cfg.MODEL.ROI_BOX_HEAD.NUM_CLASSES
+    cls_agnostic_bbox_reg = cfg.MODEL.CLS_AGNOSTIC_BBOX_REG
+
+    score_thresh = cfg.MODEL.ROI_HEADS.SCORE_THRESH
+    nms_thresh = cfg.MODEL.ROI_HEADS.NMS
+    detections_per_img = cfg.MODEL.ROI_HEADS.DETECTIONS_PER_IMG
+    #box_coder = BoxCoder(cfg.MODEL.ROI_HEADS.BBOX_REG_WEIGHTS)
+
+    fg_iou_thresh = cfg.MODEL.ROI_HEADS.FG_IOU_THRESHOLD
+    bg_iou_thresh = cfg.MODEL.ROI_HEADS.BG_IOU_THRESHOLD
+
+    batch_size_per_image = cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE
+    positive_fraction = cfg.MODEL.ROI_HEADS.POSITIVE_FRACTION
+
+    feature_extractor = FPN2MLPFeatureExtractor(
+            resolution,
+            scales,
+            sampling_ratio,
+            in_channels,
+            representation_size,
+            use_gn)
+    box_predictor = FPNPredictor(
+            representation_size,
+            num_classes,
+            cls_agnostic_bbox_reg)
+
+
+    from ..roi_heads.roi_heads2 import StandardRoiHeads
+
+    bbox_reg_weights = cfg.MODEL.ROI_HEADS.BBOX_REG_WEIGHTS
+    return StandardRoiHeads(feature_extractor, box_predictor,
+            fg_iou_thresh, bg_iou_thresh, batch_size_per_image, positive_fraction, bbox_reg_weights,
+            score_thresh,
+            nms_thresh,
+            detections_per_img,
+            cls_agnostic_bbox_reg
+            )
+
+
 from ..roi_heads.mask_head.mask_head import build_roi_mask_head
 from ..roi_heads.keypoint_head.keypoint_head import build_roi_keypoint_head
 from ..roi_heads.roi_heads import CombinedROIHeads
-def build_roi_heads(cfg, in_channels):
+def build_roi_heads0(cfg, in_channels):
     # individually create the heads, that will be combined together
     # afterwards
     roi_heads = []
