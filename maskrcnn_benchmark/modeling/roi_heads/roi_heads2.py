@@ -1,49 +1,45 @@
 import torch
 
-from .box_head.box_head import build_roi_box_head
-from .mask_head.mask_head import build_roi_mask_head, keep_only_positive_boxes
-from .keypoint_head.keypoint_head import build_roi_keypoint_head
-
-
-import torch
 import torch.nn.functional as F
 from torch import nn
 
+# inference
 from maskrcnn_benchmark.structures.bounding_box import BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms
 from maskrcnn_benchmark.structures.boxlist_ops import cat_boxlist
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 
+# loss
+from maskrcnn_benchmark.modeling.utils import cat
+from maskrcnn_benchmark.layers import smooth_l1_loss
+
+# TwoMLPHead
+from maskrcnn_benchmark.modeling.make_layers import make_fc
+
+# StandardRoiHead
+from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
+    BalancedPositiveNegativeSampler
+)
+from maskrcnn_benchmark.modeling.matcher import Matcher
+from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 
 
-class FPN2MLPFeatureExtractor(nn.Module):
+class TwoMLPHead(nn.Module):
     """
     Heads for FPN for classification
     """
 
     def __init__(self,
-            # pooler
-            resolution, scales, sampling_ratio,
             # head
             in_channels, representation_size, use_gn
             ):
-        super(FPN2MLPFeatureExtractor, self).__init__()
-        from maskrcnn_benchmark.modeling.poolers import Pooler
-        from maskrcnn_benchmark.modeling.make_layers import make_fc
+        super(TwoMLPHead, self).__init__()
 
-        pooler = Pooler(
-            output_size=(resolution, resolution),
-            scales=scales,
-            sampling_ratio=sampling_ratio,
-        )
-        input_size = in_channels * resolution ** 2
-        self.pooler = pooler
-        self.fc6 = make_fc(input_size, representation_size, use_gn)
+        self.fc6 = make_fc(in_channels, representation_size, use_gn)
         self.fc7 = make_fc(representation_size, representation_size, use_gn)
         self.out_channels = representation_size
 
-    def forward(self, x, proposals):
-        x = self.pooler(x, proposals)
+    def forward(self, x):
         x = x.view(x.size(0), -1)
 
         x = F.relu(self.fc6(x))
@@ -52,9 +48,9 @@ class FPN2MLPFeatureExtractor(nn.Module):
         return x
 
 
-class FPNPredictor(nn.Module):
+class FastRCNNPredictor(nn.Module):
     def __init__(self, in_channels, num_classes, cls_agnostic_bbox_reg):
-        super(FPNPredictor, self).__init__()
+        super(FastRCNNPredictor, self).__init__()
         representation_size = in_channels
 
         self.cls_score = nn.Linear(representation_size, num_classes)
@@ -225,9 +221,6 @@ def fastrcnn_loss(class_logits, box_regression, proposals, box_coder):
         classification_loss (Tensor)
         box_loss (Tensor)
     """
-    from maskrcnn_benchmark.modeling.utils import cat
-    from maskrcnn_benchmark.layers import smooth_l1_loss
-    from torch.nn import functional as F
 
     device = class_logits.device
 
@@ -265,8 +258,7 @@ def fastrcnn_loss(class_logits, box_regression, proposals, box_coder):
 
 
 class StandardRoiHeads(torch.nn.Module):
-    def __init__(self, # roi_pool, box_head,
-            box_roi_features,
+    def __init__(self, box_roi_pool, box_head,
             box_predictor,
             fg_iou_thresh, bg_iou_thresh,
             batch_size_per_image, positive_fraction,
@@ -278,12 +270,6 @@ class StandardRoiHeads(torch.nn.Module):
             cls_agnostic_bbox_reg
             ):
         super(StandardRoiHeads, self).__init__()
-        from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
-            BalancedPositiveNegativeSampler
-        )
-        from maskrcnn_benchmark.modeling.box_coder import BoxCoder
-        from maskrcnn_benchmark.modeling.matcher import Matcher
-        from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 
         self.box_similarity = boxlist_iou
         # assign ground-truth boxes for each proposal
@@ -299,13 +285,9 @@ class StandardRoiHeads(torch.nn.Module):
         self.box_coder = BoxCoder(bbox_reg_weights)
         self.fields_to_keep = ["labels"]
 
-        # self.roi_pool = roi_pool
-        # self.box_head = box_head
-        self.box = torch.nn.Module()
-        self.box.feature_extractor = box_roi_features
-        self.box.predictor = box_predictor
-        #self.box_roi_features = box_roi_features
-        #self.box_predictor = box_predictor
+        self.box_roi_pool = box_roi_pool
+        self.box_head = box_head
+        self.box_predictor = box_predictor
 
         self.fastrcnn_inference = FastRCNNInference(score_thresh, nms_thresh,
                 detections_per_img, self.box_coder, cls_agnostic_bbox_reg)
@@ -364,14 +346,9 @@ class StandardRoiHeads(torch.nn.Module):
             self.assign_targets_to_proposals(proposals, targets)
             proposals = self.subsample_proposals(proposals)
 
-        #box_features = self.roi_pool(features, proposals)
-        #box_features = self.box_head(box_features)
-        #box_features = self.box_roi_features(features, proposals)
-        #class_logits, box_regression = self.box_predictor(box_features)
-
-
-        box_features = self.box.feature_extractor(features, proposals)
-        class_logits, box_regression = self.box.predictor(box_features)
+        box_features = self.box_roi_pool(features, proposals)
+        box_features = self.box_head(box_features)
+        class_logits, box_regression = self.box_predictor(box_features)
 
         if self.training:
             loss_classifier, loss_box_reg = fastrcnn_loss(class_logits, box_regression, proposals, self.box_coder)
