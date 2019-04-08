@@ -47,6 +47,43 @@ class RPNHead(nn.Module):
         return logits, bbox_reg
 
 
+class RPNWrapUp(torch.nn.Module):
+    def __init__(self, box_selector_train, box_selector_test, loss_evaluator, rpn_only):
+        super(RPNWrapUp, self).__init__()
+        self.box_selector_train = box_selector_train
+        self.box_selector_test = box_selector_test
+        self.loss_evaluator = loss_evaluator
+        self.rpn_only = rpn_only
+
+    def forward(self, objectness, box_regression, anchors, targets=None):
+        if self.training:
+            if self.rpn_only:
+                # When training an RPN-only model, the loss is determined by the
+                # predicted objectness and rpn_box_regression values and there is
+                # no need to transform the anchors into predicted boxes; this is an
+                # optimization that avoids the unnecessary transformation.
+                boxes = anchors
+            else:
+                # For end-to-end models, anchors must be transformed into boxes and
+                # sampled into a training batch.
+                with torch.no_grad():
+                    boxes = self.box_selector_train(
+                        anchors, objectness, box_regression, targets
+                    )
+            loss_objectness, loss_rpn_box_reg = self.loss_evaluator(
+                anchors, objectness, box_regression, targets
+            )
+            losses = {
+                "loss_objectness": loss_objectness,
+                "loss_rpn_box_reg": loss_rpn_box_reg,
+            }
+            return boxes, losses
+
+        boxes = self.box_selector_test(anchors, objectness, rpn_box_regression)
+        return boxes, {}
+
+
+
 class RPNModule(torch.nn.Module):
     """
     Module for RPN computation. Takes feature maps from the backbone and RPN
@@ -58,9 +95,7 @@ class RPNModule(torch.nn.Module):
 
         self.anchor_generator = anchor_generator
         self.head = head
-        self.box_selector_train = box_selector_train
-        self.box_selector_test = box_selector_test
-        self.loss_evaluator = loss_evaluator
+        self.rpn_wrapup = RPNWrapUp(box_selector_train, box_selector_test, loss_evaluator, rpn_only)
         self.rpn_only = rpn_only
 
     def forward(self, images, features, targets=None):
@@ -80,38 +115,8 @@ class RPNModule(torch.nn.Module):
         """
         objectness, rpn_box_regression = self.head(features)
         anchors = self.anchor_generator(images, features)
-
-        if self.training:
-            return self._forward_train(anchors, objectness, rpn_box_regression, targets)
-        else:
-            return self._forward_test(anchors, objectness, rpn_box_regression)
-
-    def _forward_train(self, anchors, objectness, rpn_box_regression, targets):
-        if self.rpn_only:
-            # When training an RPN-only model, the loss is determined by the
-            # predicted objectness and rpn_box_regression values and there is
-            # no need to transform the anchors into predicted boxes; this is an
-            # optimization that avoids the unnecessary transformation.
-            boxes = anchors
-        else:
-            # For end-to-end models, anchors must be transformed into boxes and
-            # sampled into a training batch.
-            with torch.no_grad():
-                boxes = self.box_selector_train(
-                    anchors, objectness, rpn_box_regression, targets
-                )
-        loss_objectness, loss_rpn_box_reg = self.loss_evaluator(
-            anchors, objectness, rpn_box_regression, targets
-        )
-        losses = {
-            "loss_objectness": loss_objectness,
-            "loss_rpn_box_reg": loss_rpn_box_reg,
-        }
+        boxes, losses = self.rpn_wrapup(objectness, rpn_box_regression, anchors, targets)
         return boxes, losses
-
-    def _forward_test(self, anchors, objectness, rpn_box_regression):
-        boxes = self.box_selector_test(anchors, objectness, rpn_box_regression)
-        return boxes, {}
 
 
 def build_rpn(cfg, in_channels):

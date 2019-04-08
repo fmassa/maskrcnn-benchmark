@@ -14,6 +14,7 @@ from ..utils import cat
 
 from maskrcnn_benchmark.layers import smooth_l1_loss
 from maskrcnn_benchmark.modeling.matcher import Matcher
+from maskrcnn_benchmark.modeling.assign_target_to_proposal import Target2ProposalAssigner
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 from maskrcnn_benchmark.structures.boxlist_ops import cat_boxlist
 
@@ -33,6 +34,7 @@ class RPNLossComputation(object):
         """
         # self.target_preparator = target_preparator
         self.proposal_matcher = proposal_matcher
+        #self.assign_target_to_proposal = Target2ProposalAssigner(proposal_matcher, [])
         self.fg_bg_sampler = fg_bg_sampler
         self.box_coder = box_coder
         self.copied_fields = []

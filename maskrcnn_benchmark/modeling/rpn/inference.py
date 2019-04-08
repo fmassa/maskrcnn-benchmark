@@ -48,29 +48,6 @@ class RPNPostProcessor(torch.nn.Module):
             fpn_post_nms_top_n = post_nms_top_n
         self.fpn_post_nms_top_n = fpn_post_nms_top_n
 
-    def add_gt_proposals(self, proposals, targets):
-        """
-        Arguments:
-            proposals: list[BoxList]
-            targets: list[BoxList]
-        """
-        # Get the device we're operating on
-        device = proposals[0].bbox.device
-
-        gt_boxes = [target.copy_with_fields([]) for target in targets]
-
-        # later cat of bbox requires all fields to be present for all bbox
-        # so we need to add a dummy for objectness that's missing
-        for gt_box in gt_boxes:
-            gt_box.add_field("objectness", torch.ones(len(gt_box), device=device))
-
-        proposals = [
-            cat_boxlist((proposal, gt_box))
-            for proposal, gt_box in zip(proposals, gt_boxes)
-        ]
-
-        return proposals
-
     def forward_for_single_feature_map(self, anchors, objectness, box_regression):
         """
         Arguments:
@@ -142,10 +119,6 @@ class RPNPostProcessor(torch.nn.Module):
 
         if num_levels > 1:
             boxlists = self.select_over_all_levels(boxlists)
-
-        # append ground-truth bboxes to proposals
-        if self.training and targets is not None:
-            boxlists = self.add_gt_proposals(boxlists, targets)
 
         return boxlists
 

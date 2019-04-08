@@ -23,6 +23,11 @@ from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
 from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou  # move to BoxList
 
+# Mask
+from maskrcnn_benchmark.modeling.make_layers import make_conv3x3
+from maskrcnn_benchmark.layers import Conv2d
+from maskrcnn_benchmark.layers import ConvTranspose2d
+
 
 class TwoMLPHead(nn.Module):
     """
@@ -308,10 +313,6 @@ def keep_only_positive_boxes(boxes):
     return positive_boxes, positive_inds
 
 
-
-from maskrcnn_benchmark.modeling.make_layers import make_conv3x3
-
-
 class MaskRCNNHeads(nn.Module):
     """
     Heads for FPN for classification
@@ -346,29 +347,6 @@ class MaskRCNNHeads(nn.Module):
             x = F.relu(getattr(self, layer_name)(x))
 
         return x
-
-
-from maskrcnn_benchmark.layers import Conv2d
-
-
-class MaskRCNNConv1x1Predictor(nn.Module):
-    def __init__(self, in_channels, num_classes):
-        super(MaskRCNNConv1x1Predictor, self).__init__()
-        self.mask_fcn_logits = Conv2d(in_channels, num_classes, 1, 1, 0)
-
-        for name, param in self.named_parameters():
-            if "bias" in name:
-                nn.init.constant_(param, 0)
-            elif "weight" in name:
-                # Caffe2 implementation uses MSRAFill, which in fact
-                # corresponds to kaiming_normal_ in PyTorch
-                nn.init.kaiming_normal_(param, mode="fan_out", nonlinearity="relu")
-
-    def forward(self, x):
-        return self.mask_fcn_logits(x)
-
-
-from maskrcnn_benchmark.layers import ConvTranspose2d
 
 
 class MaskRCNNC4Predictor(nn.Module):
@@ -512,13 +490,8 @@ def maskrcnn_loss(mask_logits, proposals, discretization_size):
     mask_targets = [project_masks_on_boxes(proposal.get_field("matched_masks"), proposal, discretization_size)
             for proposal in proposals]
 
-    # labels, mask_targets = self.prepare_targets(proposals, targets)
-
     labels = cat(labels, dim=0)
     mask_targets = cat(mask_targets, dim=0)
-
-    # positive_inds = torch.nonzero(labels > 0).squeeze(1)
-    # labels_pos = labels[positive_inds]
 
     # torch.mean (in binary_cross_entropy_with_logits) doesn't
     # accept empty tensors, so handle it separately
@@ -526,7 +499,6 @@ def maskrcnn_loss(mask_logits, proposals, discretization_size):
         return mask_logits.sum() * 0
 
     mask_loss = F.binary_cross_entropy_with_logits(
-        # mask_logits[positive_inds, labels_pos], mask_targets
         mask_logits[torch.arange(labels.shape[0], device=labels.device), labels], mask_targets
     )
     return mask_loss
@@ -631,9 +603,36 @@ class StandardRoIHeads(torch.nn.Module):
 
         return proposals
 
+    def add_gt_proposals(self, proposals, targets):
+        """
+        Arguments:
+            proposals: list[BoxList]
+            targets: list[BoxList]
+        """
+        # Get the device we're operating on
+        device = proposals[0].bbox.device
+
+        gt_boxes = [target.copy_with_fields([]) for target in targets]
+
+        # later cat of bbox requires all fields to be present for all bbox
+        # so we need to add a dummy for objectness that's missing
+        for gt_box in gt_boxes:
+            gt_box.add_field("objectness", torch.ones(len(gt_box), device=device))
+
+        proposals = [
+            cat_boxlist((proposal, gt_box))
+            for proposal, gt_box in zip(proposals, gt_boxes)
+        ]
+
+        return proposals
 
     def forward(self, features, proposals, targets=None):
         if self.training:
+            assert targets is not None
+
+            # append ground-truth bboxes to proposals
+            proposals = self.add_gt_proposals(proposals, targets)
+
             self.assign_targets_to_proposals(proposals, targets)
             proposals = self.subsample_proposals(proposals)
 
@@ -644,7 +643,7 @@ class StandardRoIHeads(torch.nn.Module):
         result, losses = self.fastrcnn_wrapup(class_logits, box_regression, proposals)
 
 
-        if self.mask_predictor is not None:
+        if self.mask_predictor:
             mask_proposals = result
             if self.training:
                 # during training, only focus on positive boxes
