@@ -79,7 +79,7 @@ class RPNWrapUp(torch.nn.Module):
             }
             return boxes, losses
 
-        boxes = self.box_selector_test(anchors, objectness, rpn_box_regression)
+        boxes = self.box_selector_test(anchors, objectness, box_regression)
         return boxes, {}
 
 
