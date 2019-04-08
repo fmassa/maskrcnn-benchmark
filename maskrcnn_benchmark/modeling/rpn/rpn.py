@@ -6,9 +6,9 @@ from torch import nn
 from maskrcnn_benchmark.modeling import registry
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 from maskrcnn_benchmark.modeling.rpn.retinanet.retinanet import build_retinanet
-from .loss import make_rpn_loss_evaluator
+# from .loss import make_rpn_loss_evaluator
 from .anchor_generator import make_anchor_generator
-from .inference import make_rpn_postprocessor
+# from .inference import make_rpn_postprocessor
 
 
 
@@ -154,6 +154,7 @@ def assign_targets_to_anchors(anchors, targets, box_similarity, proposal_matcher
         anchors_per_image.add_field("rpn_matched_gt_boxes", matched_targets.bbox)
         anchors_per_image.add_field("rpn_labels", labels_per_image)
 
+
 def rpn_loss(objectness, box_regression, anchors, targets,
         fg_bg_sampler, box_coder, box_similarity, proposal_matcher, fields_to_keep, discard_cases):
     """
@@ -197,6 +198,7 @@ def rpn_loss(objectness, box_regression, anchors, targets,
         size_average=False,
     ) / (sampled_inds.numel())
 
+    # TODO replace with Focal Loss and remove fg_bg_sampler?
     objectness_loss = F.binary_cross_entropy_with_logits(
         objectness[sampled_inds], labels[sampled_inds]
     )
@@ -208,6 +210,179 @@ def generate_rpn_labels(matched_targets):
     matched_idxs = matched_targets.get_field("matched_idxs")
     labels_per_image = matched_idxs >= 0
     return labels_per_image
+
+from maskrcnn_benchmark.modeling.box_coder import BoxCoder
+from maskrcnn_benchmark.structures.bounding_box import BoxList
+from maskrcnn_benchmark.structures.boxlist_ops import cat_boxlist
+from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms
+from maskrcnn_benchmark.structures.boxlist_ops import remove_small_boxes
+
+from ..utils import cat
+from .utils import permute_and_flatten
+
+class RPNInference(torch.nn.Module):
+    """
+    Performs post-processing on the outputs of the RPN boxes, before feeding the
+    proposals to the heads
+    """
+
+    def __init__(
+        self,
+        pre_nms_top_n,
+        post_nms_top_n,
+        nms_thresh,
+        min_size,
+        box_coder=None,
+        fpn_post_nms_top_n=None,
+    ):
+        """
+        Arguments:
+            pre_nms_top_n (int)
+            post_nms_top_n (int)
+            nms_thresh (float)
+            min_size (int)
+            box_coder (BoxCoder)
+            fpn_post_nms_top_n (int)
+        """
+        super(RPNInference, self).__init__()
+        self.pre_nms_top_n = pre_nms_top_n
+        self.post_nms_top_n = post_nms_top_n
+        self.nms_thresh = nms_thresh
+        self.min_size = min_size
+
+        if box_coder is None:
+            box_coder = BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
+        self.box_coder = box_coder
+
+        if fpn_post_nms_top_n is None:
+            fpn_post_nms_top_n = post_nms_top_n
+        self.fpn_post_nms_top_n = fpn_post_nms_top_n
+
+    def prepare_proposals(self, anchors, objectness, box_regression):
+        device = objectness.device
+        N, A, H, W = objectness.shape
+
+        objectness = objectness.sigmoid()
+
+        # put in the same format as anchors
+        objectness = permute_and_flatten(objectness, N, A, 1, H, W).view(N, -1)
+        box_regression = permute_and_flatten(box_regression, N, A, 4, H, W)
+
+        num_anchors = A * H * W
+
+        pre_nms_top_n = min(self.pre_nms_top_n, num_anchors)
+        objectness, topk_idx = objectness.topk(pre_nms_top_n, dim=1, sorted=True)
+
+        batch_idx = torch.arange(N, device=device)[:, None]
+        box_regression = box_regression[batch_idx, topk_idx]
+
+        image_shapes = [box.size for box in anchors]
+        concat_anchors = torch.cat([a.bbox for a in anchors], dim=0)
+        concat_anchors = concat_anchors.reshape(N, -1, 4)[batch_idx, topk_idx]
+
+        proposals = self.box_coder.decode(
+            box_regression.view(-1, 4), concat_anchors.view(-1, 4)
+        )
+
+        proposals = proposals.view(N, -1, 4)
+        return proposals, objectness
+
+    def decode_anchors(self, anchors, box_regression):
+        # TODO make this return a BoxList?
+        device = box_regression.device
+        N, Ax4, H, W = box_regression.shape
+        A = Ax4 // 4
+
+        # put in the same format as anchors
+        box_regression = permute_and_flatten(box_regression, N, A, 4, H, W)
+
+        concat_anchors = torch.cat([a.bbox for a in anchors], dim=0)
+        concat_anchors = concat_anchors.reshape(N, -1, 4)#[batch_idx, topk_idx]
+
+        proposals = self.box_coder.decode(
+            box_regression.view(-1, 4), concat_anchors.view(-1, 4)
+        )
+
+        proposals = proposals.view(N, -1, 4)
+        return proposals
+
+    def select_top_n_pre_nms(self, proposals, objectness):
+        selected_boxlists = []
+        device = objectness.device
+        batch_size, num_anchors = objectness.shape
+        pre_nms_top_n = min(self.pre_nms_top_n, num_anchors)
+        objectness, topk_idx = objectness.topk(pre_nms_top_n, dim=1, sorted=True)
+        batch_idx = torch.arange(batch_size, device=device)[:, None]
+        proposals = proposals[batch_idx, topk_idx]
+        return proposals, objectness
+
+    def filter_proposals(self, proposals, objectness, image_shapes):
+        result = []
+        for proposal, score, im_shape in zip(proposals, objectness, image_shapes):
+            boxlist = BoxList(proposal, im_shape, mode="xyxy")
+            boxlist.add_field("objectness", score)
+            boxlist = boxlist.clip_to_image(remove_empty=False)
+            boxlist = remove_small_boxes(boxlist, self.min_size)
+            boxlist = boxlist_nms(
+                boxlist,
+                self.nms_thresh,
+                max_proposals=self.post_nms_top_n,
+                score_field="objectness",
+            )
+            result.append(boxlist)
+        return result
+
+    def forward_for_single_feature_map(self, anchors, objectness, box_regression):
+        """
+        Arguments:
+            anchors: list[BoxList]
+            objectness: tensor of size N, A, H, W
+            box_regression: tensor of size N, A * 4, H, W
+        """
+        proposals = self.decode_anchors(anchors, box_regression)
+        objectness = objectness.sigmoid()
+        N, A, H, W = objectness.shape
+        objectness = permute_and_flatten(objectness, N, A, 1, H, W).view(N, -1)
+        proposals, objectness = self.select_top_n_pre_nms(proposals, objectness)
+        image_shapes = [box.size for box in anchors]
+        result = self.filter_proposals(proposals, objectness, image_shapes)
+        return result
+
+    def forward(self, anchors, objectness, box_regression, targets=None):
+        """
+        Arguments:
+            anchors: list[list[BoxList]]
+            objectness: list[tensor]
+            box_regression: list[tensor]
+
+        Returns:
+            boxlists (list[BoxList]): the post-processed anchors, after
+                applying box decoding and NMS
+        """
+        sampled_boxes = []
+        num_levels = len(objectness)
+        anchors = list(zip(*anchors))
+        for a, o, b in zip(anchors, objectness, box_regression):
+            sampled_boxes.append(self.forward_for_single_feature_map(a, o, b))
+
+        boxlists = list(zip(*sampled_boxes))
+        boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
+
+        if num_levels > 1:
+            boxlists = self.select_over_all_levels(boxlists)
+
+        return boxlists
+
+    def select_over_all_levels(self, boxlists):
+        num_images = len(boxlists)
+        for i in range(num_images):
+            objectness = boxlists[i].get_field("objectness")
+            post_nms_top_n = min(self.fpn_post_nms_top_n, len(objectness))
+            _, inds_sorted = torch.topk(
+                objectness, post_nms_top_n, dim=0, sorted=True
+            )
+            boxlists[i] = boxlists[i][inds_sorted]
+        return boxlists
 
 
 class RPNWrapUp(torch.nn.Module):
@@ -253,103 +428,27 @@ class RPNWrapUp(torch.nn.Module):
         return boxes, {}
 
 
+def make_rpn_postprocessor(config, rpn_box_coder, is_train):
+    fpn_post_nms_top_n = config.MODEL.RPN.FPN_POST_NMS_TOP_N_TRAIN
+    if not is_train:
+        fpn_post_nms_top_n = config.MODEL.RPN.FPN_POST_NMS_TOP_N_TEST
 
-
-class RPNWrapUp2(torch.nn.Module):
-    def __init__(self, box_selector_train, box_selector_test, loss_evaluator, rpn_only):
-        super(RPNWrapUp2, self).__init__()
-        self.box_selector_train = box_selector_train
-        self.box_selector_test = box_selector_test
-        self.loss_evaluator = loss_evaluator
-        self.rpn_only = rpn_only
-
-    def forward(self, objectness, box_regression, anchors, targets=None):
-        if self.training:
-            if self.rpn_only:
-                # When training an RPN-only model, the loss is determined by the
-                # predicted objectness and rpn_box_regression values and there is
-                # no need to transform the anchors into predicted boxes; this is an
-                # optimization that avoids the unnecessary transformation.
-                boxes = anchors
-            else:
-                # For end-to-end models, anchors must be transformed into boxes and
-                # sampled into a training batch.
-                with torch.no_grad():
-                    boxes = self.box_selector_train(
-                        anchors, objectness, box_regression, targets
-                    )
-            loss_objectness, loss_rpn_box_reg = self.loss_evaluator(
-                anchors, objectness, box_regression, targets
-            )
-            losses = {
-                "loss_objectness": loss_objectness,
-                "loss_rpn_box_reg": loss_rpn_box_reg,
-            }
-            return boxes, losses
-
-        boxes = self.box_selector_test(anchors, objectness, box_regression)
-        return boxes, {}
-
-
-
-class RPNModule(torch.nn.Module):
-    """
-    Module for RPN computation. Takes feature maps from the backbone and RPN
-    proposals and losses. Works for both FPN and non-FPN.
-    """
-
-    def __init__(self, anchor_generator, head, box_selector_train, box_selector_test, loss_evaluator, rpn_only):
-        super(RPNModule, self).__init__()
-
-        self.anchor_generator = anchor_generator
-        self.head = head
-        self.rpn_wrapup = RPNWrapUp2(box_selector_train, box_selector_test, loss_evaluator, rpn_only)
-        self.rpn_only = rpn_only
-
-    def forward(self, images, features, targets=None):
-        """
-        Arguments:
-            images (ImageList): images for which we want to compute the predictions
-            features (list[Tensor]): features computed from the images that are
-                used for computing the predictions. Each tensor in the list
-                correspond to different feature levels
-            targets (list[BoxList): ground-truth boxes present in the image (optional)
-
-        Returns:
-            boxes (list[BoxList]): the predicted boxes from the RPN, one BoxList per
-                image.
-            losses (dict[Tensor]): the losses for the model during training. During
-                testing, it is an empty dict.
-        """
-        objectness, rpn_box_regression = self.head(features)
-        anchors = self.anchor_generator(images, features)
-        boxes, losses = self.rpn_wrapup(objectness, rpn_box_regression, anchors, targets)
-        return boxes, losses
-
-
-def build_rpn0(cfg, in_channels):
-    """
-    This gives the gist of it. Not super important because it doesn't change as much
-    """
-    if cfg.MODEL.RETINANET_ON:
-        return build_retinanet(cfg, in_channels)
-
-
-    anchor_generator = make_anchor_generator(cfg)
-
-    rpn_head = registry.RPN_HEADS[cfg.MODEL.RPN.RPN_HEAD]
-    head = rpn_head(
-        in_channels, anchor_generator.num_anchors_per_location()[0]
+    pre_nms_top_n = config.MODEL.RPN.PRE_NMS_TOP_N_TRAIN
+    post_nms_top_n = config.MODEL.RPN.POST_NMS_TOP_N_TRAIN
+    if not is_train:
+        pre_nms_top_n = config.MODEL.RPN.PRE_NMS_TOP_N_TEST
+        post_nms_top_n = config.MODEL.RPN.POST_NMS_TOP_N_TEST
+    nms_thresh = config.MODEL.RPN.NMS_THRESH
+    min_size = config.MODEL.RPN.MIN_SIZE
+    box_selector = RPNInference(
+        pre_nms_top_n=pre_nms_top_n,
+        post_nms_top_n=post_nms_top_n,
+        nms_thresh=nms_thresh,
+        min_size=min_size,
+        box_coder=rpn_box_coder,
+        fpn_post_nms_top_n=fpn_post_nms_top_n,
     )
-
-    rpn_box_coder = BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
-
-    box_selector_train = make_rpn_postprocessor(cfg, rpn_box_coder, is_train=True)
-    box_selector_test = make_rpn_postprocessor(cfg, rpn_box_coder, is_train=False)
-
-    loss_evaluator = make_rpn_loss_evaluator(cfg, rpn_box_coder)
-
-    return RPNModule(anchor_generator, head, box_selector_train, box_selector_test, loss_evaluator, cfg.MODEL.RPN_ONLY)
+    return box_selector
 
 def build_rpn(cfg, in_channels):
     """
