@@ -76,7 +76,7 @@ def build_roi_box_head(cfg, in_channels):
     return roi_box_head
 
 def build_roi_heads(cfg, in_channels):
-    from ..roi_heads.roi_heads2 import TwoMLPHead, FastRCNNPredictor
+    from ..roi_heads.roi_heads2 import TwoMLPHead, FastRCNNPredictor, MaskRCNNHeads, MaskRCNNC4Predictor
     from maskrcnn_benchmark.modeling.poolers import Pooler
 
     resolution = cfg.MODEL.ROI_BOX_HEAD.POOLER_RESOLUTION
@@ -112,6 +112,27 @@ def build_roi_heads(cfg, in_channels):
             num_classes,
             cls_agnostic_bbox_reg)
 
+    mask_pooler = None
+    mask_head = None
+    mask_predictor = None
+    mask_discretization_size = None
+    if cfg.MODEL.MASK_ON:
+        resolution = cfg.MODEL.ROI_MASK_HEAD.POOLER_RESOLUTION
+        scales = cfg.MODEL.ROI_MASK_HEAD.POOLER_SCALES
+        sampling_ratio = cfg.MODEL.ROI_MASK_HEAD.POOLER_SAMPLING_RATIO
+        mask_pooler = Pooler(
+            output_size=(resolution, resolution),
+            scales=scales,
+            sampling_ratio=sampling_ratio,
+        )
+
+        use_gn = cfg.MODEL.ROI_MASK_HEAD.USE_GN
+        layers = cfg.MODEL.ROI_MASK_HEAD.CONV_LAYERS
+        dilation = cfg.MODEL.ROI_MASK_HEAD.DILATION
+        mask_head = MaskRCNNHeads(in_channels, layers, dilation, use_gn)
+        dim_reduced = cfg.MODEL.ROI_MASK_HEAD.CONV_LAYERS[-1]
+        mask_predictor = MaskRCNNC4Predictor(in_channels, dim_reduced, num_classes)
+        mask_discretization_size = cfg.MODEL.ROI_MASK_HEAD.RESOLUTION
 
     from ..roi_heads.roi_heads2 import StandardRoIHeads
 
@@ -121,7 +142,12 @@ def build_roi_heads(cfg, in_channels):
             score_thresh,
             nms_thresh,
             detections_per_img,
-            cls_agnostic_bbox_reg
+            cls_agnostic_bbox_reg,
+            # Mask
+            mask_pooler,
+            mask_head,
+            mask_predictor,
+            mask_discretization_size
             )
 
 
