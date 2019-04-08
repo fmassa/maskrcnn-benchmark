@@ -69,7 +69,7 @@ class RPN(torch.nn.Module):
             fg_iou_thresh, bg_iou_thresh,
             batch_size_per_image, positive_fraction,
             #
-            box_selector_train, box_selector_test,
+            box_selector,
             rpn_only):
         """
         Arguments:
@@ -99,7 +99,7 @@ class RPN(torch.nn.Module):
         self.head = head
         self.rpn_wrapup = RPNWrapUp(fg_bg_sampler, box_coder,
                 box_similarity, proposal_matcher, fields_to_keep, discard_cases,
-                box_selector_train, box_selector_test, rpn_only)
+                box_selector, rpn_only)
 
     def forward(self, images, features, targets=None):
         """
@@ -245,8 +245,8 @@ class RPNInference(torch.nn.Module):
             fpn_post_nms_top_n (int)
         """
         super(RPNInference, self).__init__()
-        self.pre_nms_top_n = pre_nms_top_n
-        self.post_nms_top_n = post_nms_top_n
+        self._pre_nms_top_n = pre_nms_top_n
+        self._post_nms_top_n = post_nms_top_n
         self.nms_thresh = nms_thresh
         self.min_size = min_size
 
@@ -256,38 +256,27 @@ class RPNInference(torch.nn.Module):
 
         if fpn_post_nms_top_n is None:
             fpn_post_nms_top_n = post_nms_top_n
-        self.fpn_post_nms_top_n = fpn_post_nms_top_n
+        self._fpn_post_nms_top_n = fpn_post_nms_top_n
 
-    def prepare_proposals(self, anchors, objectness, box_regression):
-        device = objectness.device
-        N, A, H, W = objectness.shape
+    @property
+    def pre_nms_top_n(self):
+        if self.training:
+            return self._pre_nms_top_n['training']
+        return self._pre_nms_top_n['testing']
 
-        objectness = objectness.sigmoid()
+    @property
+    def post_nms_top_n(self):
+        if self.training:
+            return self._post_nms_top_n['training']
+        return self._post_nms_top_n['testing']
 
-        # put in the same format as anchors
-        objectness = permute_and_flatten(objectness, N, A, 1, H, W).view(N, -1)
-        box_regression = permute_and_flatten(box_regression, N, A, 4, H, W)
+    @property
+    def fpn_post_nms_top_n(self):
+        if self.training:
+            return self._fpn_post_nms_top_n['training']
+        return self._fpn_post_nms_top_n['testing']
 
-        num_anchors = A * H * W
-
-        pre_nms_top_n = min(self.pre_nms_top_n, num_anchors)
-        objectness, topk_idx = objectness.topk(pre_nms_top_n, dim=1, sorted=True)
-
-        batch_idx = torch.arange(N, device=device)[:, None]
-        box_regression = box_regression[batch_idx, topk_idx]
-
-        image_shapes = [box.size for box in anchors]
-        concat_anchors = torch.cat([a.bbox for a in anchors], dim=0)
-        concat_anchors = concat_anchors.reshape(N, -1, 4)[batch_idx, topk_idx]
-
-        proposals = self.box_coder.decode(
-            box_regression.view(-1, 4), concat_anchors.view(-1, 4)
-        )
-
-        proposals = proposals.view(N, -1, 4)
-        return proposals, objectness
-
-    def decode_anchors(self, anchors, box_regression):
+    def regress_anchors(self, anchors, box_regression):
         # TODO make this return a BoxList?
         device = box_regression.device
         N, Ax4, H, W = box_regression.shape
@@ -297,7 +286,7 @@ class RPNInference(torch.nn.Module):
         box_regression = permute_and_flatten(box_regression, N, A, 4, H, W)
 
         concat_anchors = torch.cat([a.bbox for a in anchors], dim=0)
-        concat_anchors = concat_anchors.reshape(N, -1, 4)#[batch_idx, topk_idx]
+        concat_anchors = concat_anchors.reshape(N, -1, 4)
 
         proposals = self.box_coder.decode(
             box_regression.view(-1, 4), concat_anchors.view(-1, 4)
@@ -332,14 +321,14 @@ class RPNInference(torch.nn.Module):
             result.append(boxlist)
         return result
 
-    def forward_for_single_feature_map(self, anchors, objectness, box_regression):
+    def process_single_feature_map(self, anchors, objectness, box_regression):
         """
         Arguments:
             anchors: list[BoxList]
             objectness: tensor of size N, A, H, W
             box_regression: tensor of size N, A * 4, H, W
         """
-        proposals = self.decode_anchors(anchors, box_regression)
+        proposals = self.regress_anchors(anchors, box_regression)
         objectness = objectness.sigmoid()
         N, A, H, W = objectness.shape
         objectness = permute_and_flatten(objectness, N, A, 1, H, W).view(N, -1)
@@ -359,17 +348,18 @@ class RPNInference(torch.nn.Module):
             boxlists (list[BoxList]): the post-processed anchors, after
                 applying box decoding and NMS
         """
-        sampled_boxes = []
-        num_levels = len(objectness)
-        anchors = list(zip(*anchors))
-        for a, o, b in zip(anchors, objectness, box_regression):
-            sampled_boxes.append(self.forward_for_single_feature_map(a, o, b))
+        with torch.no_grad():
+            sampled_boxes = []
+            num_levels = len(objectness)
+            anchors = list(zip(*anchors))
+            for a, o, b in zip(anchors, objectness, box_regression):
+                sampled_boxes.append(self.process_single_feature_map(a, o, b))
 
-        boxlists = list(zip(*sampled_boxes))
-        boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
+            boxlists = list(zip(*sampled_boxes))
+            boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
 
-        if num_levels > 1:
-            boxlists = self.select_over_all_levels(boxlists)
+            if num_levels > 1:
+                boxlists = self.select_over_all_levels(boxlists)
 
         return boxlists
 
@@ -388,7 +378,7 @@ class RPNInference(torch.nn.Module):
 class RPNWrapUp(torch.nn.Module):
     def __init__(self, fg_bg_sampler, box_coder,
             box_similarity, proposal_matcher, fields_to_keep, discard_cases,
-            box_selector_train, box_selector_test, rpn_only):
+            box_selector, rpn_only):
         super(RPNWrapUp, self).__init__()
         self.fg_bg_sampler = fg_bg_sampler
         self.box_coder = box_coder
@@ -396,8 +386,7 @@ class RPNWrapUp(torch.nn.Module):
         self.proposal_matcher = proposal_matcher
         self.discard_cases = discard_cases
         self.fields_to_keep = fields_to_keep
-        self.box_selector_train = box_selector_train
-        self.box_selector_test = box_selector_test
+        self.box_selector = box_selector
         self.rpn_only = rpn_only
 
     def forward(self, objectness, box_regression, anchors, targets=None):
@@ -411,10 +400,9 @@ class RPNWrapUp(torch.nn.Module):
             else:
                 # For end-to-end models, anchors must be transformed into boxes and
                 # sampled into a training batch.
-                with torch.no_grad():
-                    boxes = self.box_selector_train(
-                        anchors, objectness, box_regression, targets
-                    )
+                boxes = self.box_selector(
+                    anchors, objectness, box_regression, targets
+                )
             loss_objectness, loss_rpn_box_reg = rpn_loss(
                     objectness, box_regression, anchors, targets, self.fg_bg_sampler, self.box_coder,
                     self.box_similarity, self.proposal_matcher, self.fields_to_keep, self.discard_cases)
@@ -424,20 +412,16 @@ class RPNWrapUp(torch.nn.Module):
             }
             return boxes, losses
 
-        boxes = self.box_selector_test(anchors, objectness, box_regression)
+        boxes = self.box_selector(anchors, objectness, box_regression)
         return boxes, {}
 
 
-def make_rpn_postprocessor(config, rpn_box_coder, is_train):
-    fpn_post_nms_top_n = config.MODEL.RPN.FPN_POST_NMS_TOP_N_TRAIN
-    if not is_train:
-        fpn_post_nms_top_n = config.MODEL.RPN.FPN_POST_NMS_TOP_N_TEST
+def make_rpn_postprocessor(config, rpn_box_coder):
+    fpn_post_nms_top_n = dict(
+            training=config.MODEL.RPN.FPN_POST_NMS_TOP_N_TRAIN, testing=config.MODEL.RPN.FPN_POST_NMS_TOP_N_TEST)
 
-    pre_nms_top_n = config.MODEL.RPN.PRE_NMS_TOP_N_TRAIN
-    post_nms_top_n = config.MODEL.RPN.POST_NMS_TOP_N_TRAIN
-    if not is_train:
-        pre_nms_top_n = config.MODEL.RPN.PRE_NMS_TOP_N_TEST
-        post_nms_top_n = config.MODEL.RPN.POST_NMS_TOP_N_TEST
+    pre_nms_top_n = dict(training=config.MODEL.RPN.PRE_NMS_TOP_N_TRAIN, testing=config.MODEL.RPN.PRE_NMS_TOP_N_TEST)
+    post_nms_top_n = dict(training=config.MODEL.RPN.POST_NMS_TOP_N_TRAIN, testing=config.MODEL.RPN.POST_NMS_TOP_N_TEST)
     nms_thresh = config.MODEL.RPN.NMS_THRESH
     min_size = config.MODEL.RPN.MIN_SIZE
     box_selector = RPNInference(
@@ -467,8 +451,7 @@ def build_rpn(cfg, in_channels):
 
     rpn_box_coder = BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
 
-    box_selector_train = make_rpn_postprocessor(cfg, rpn_box_coder, is_train=True)
-    box_selector_test = make_rpn_postprocessor(cfg, rpn_box_coder, is_train=False)
+    box_selector = make_rpn_postprocessor(cfg, rpn_box_coder)
 
     fg_iou_thresh = cfg.MODEL.RPN.FG_IOU_THRESHOLD
     bg_iou_thresh = cfg.MODEL.RPN.BG_IOU_THRESHOLD
@@ -481,4 +464,4 @@ def build_rpn(cfg, in_channels):
     return RPN(anchor_generator, head,
             fg_iou_thresh, bg_iou_thresh,
             batch_size_per_image, positive_fraction,
-            box_selector_train, box_selector_test, rpn_only)
+            box_selector, rpn_only)

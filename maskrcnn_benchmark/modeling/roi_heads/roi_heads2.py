@@ -629,7 +629,6 @@ class StandardRoIHeads(torch.nn.Module):
     def forward(self, features, proposals, targets=None):
         if self.training:
             assert targets is not None
-
             # append ground-truth bboxes to proposals
             proposals = self.add_gt_proposals(proposals, targets)
 
