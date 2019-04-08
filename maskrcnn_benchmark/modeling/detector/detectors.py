@@ -113,10 +113,10 @@ def build_roi_heads(cfg, in_channels):
             cls_agnostic_bbox_reg)
 
 
-    from ..roi_heads.roi_heads2 import StandardRoiHeads
+    from ..roi_heads.roi_heads2 import StandardRoIHeads
 
     bbox_reg_weights = cfg.MODEL.ROI_HEADS.BBOX_REG_WEIGHTS
-    return StandardRoiHeads(pooler, feature_extractor, box_predictor,
+    return StandardRoIHeads(pooler, feature_extractor, box_predictor,
             fg_iou_thresh, bg_iou_thresh, batch_size_per_image, positive_fraction, bbox_reg_weights,
             score_thresh,
             nms_thresh,

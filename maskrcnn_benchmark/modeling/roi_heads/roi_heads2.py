@@ -5,8 +5,8 @@ from torch import nn
 
 # inference
 from maskrcnn_benchmark.structures.bounding_box import BoxList
-from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms
-from maskrcnn_benchmark.structures.boxlist_ops import cat_boxlist
+from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms  # move to BoxList
+from maskrcnn_benchmark.structures.boxlist_ops import cat_boxlist  # move to BoxList
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 
 # loss
@@ -21,7 +21,7 @@ from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
     BalancedPositiveNegativeSampler
 )
 from maskrcnn_benchmark.modeling.matcher import Matcher
-from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
+from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou  # move to BoxList
 
 
 class TwoMLPHead(nn.Module):
@@ -208,8 +208,34 @@ class FastRCNNInference(nn.Module):
         return result
 
 
+class FastRCNNWrapUp(nn.Module):
+    def __init__(
+        self,
+        score_thresh=0.05,
+        nms_thresh=0.5,
+        detections_per_img=100,
+        bbox_reg_weights=None,
+        cls_agnostic_bbox_reg=False):
+        super(FastRCNNWrapUp, self).__init__()
 
-def fastrcnn_loss(class_logits, box_regression, proposals, box_coder):
+        self.box_coder = BoxCoder(bbox_reg_weights)
+        self.cls_agnostic_bbox_reg = cls_agnostic_bbox_reg
+
+        self.fastrcnn_inference = FastRCNNInference(score_thresh, nms_thresh,
+                detections_per_img, self.box_coder, cls_agnostic_bbox_reg)
+
+    def forward(self, class_logits, box_regression, proposals):
+        if self.training:
+            loss_classifier, loss_box_reg = fastrcnn_loss(
+                class_logits, box_regression, proposals,
+                self.box_coder, self.cls_agnostic_bbox_reg)
+            return [], dict(loss_classifier=loss_classifier, loss_box_reg=loss_box_reg)
+
+        result = self.fastrcnn_inference(class_logits, box_regression, proposals)
+        return result, {}
+
+
+def fastrcnn_loss(class_logits, box_regression, proposals, box_coder, cls_agnostic_bbox_reg=False):
     """
     Computes the loss for Faster R-CNN.
 
@@ -240,7 +266,7 @@ def fastrcnn_loss(class_logits, box_regression, proposals, box_coder):
     # advanced indexing
     sampled_pos_inds_subset = torch.nonzero(labels > 0).squeeze(1)
     labels_pos = labels[sampled_pos_inds_subset]
-    if False:#self.cls_agnostic_bbox_reg:
+    if cls_agnostic_bbox_reg:
         map_inds = torch.tensor([4, 5, 6, 7], device=device)
     else:
         map_inds = 4 * labels_pos[:, None] + torch.tensor(
@@ -257,7 +283,7 @@ def fastrcnn_loss(class_logits, box_regression, proposals, box_coder):
     return classification_loss, box_loss
 
 
-class StandardRoiHeads(torch.nn.Module):
+class StandardRoIHeads(torch.nn.Module):
     def __init__(self, box_roi_pool, box_head,
             box_predictor,
             fg_iou_thresh, bg_iou_thresh,
@@ -269,7 +295,7 @@ class StandardRoiHeads(torch.nn.Module):
             detections_per_img,
             cls_agnostic_bbox_reg
             ):
-        super(StandardRoiHeads, self).__init__()
+        super(StandardRoIHeads, self).__init__()
 
         self.box_similarity = boxlist_iou
         # assign ground-truth boxes for each proposal
@@ -289,8 +315,9 @@ class StandardRoiHeads(torch.nn.Module):
         self.box_head = box_head
         self.box_predictor = box_predictor
 
-        self.fastrcnn_inference = FastRCNNInference(score_thresh, nms_thresh,
-                detections_per_img, self.box_coder, cls_agnostic_bbox_reg)
+
+        self.fastrcnn_wrapup = FastRCNNWrapUp(score_thresh, nms_thresh,
+                detections_per_img, bbox_reg_weights, cls_agnostic_bbox_reg)
 
     def assign_targets_to_proposals(self, proposals, targets):
         for proposals_per_image, targets_per_image in zip(proposals, targets):
@@ -350,9 +377,5 @@ class StandardRoiHeads(torch.nn.Module):
         box_features = self.box_head(box_features)
         class_logits, box_regression = self.box_predictor(box_features)
 
-        if self.training:
-            loss_classifier, loss_box_reg = fastrcnn_loss(class_logits, box_regression, proposals, self.box_coder)
-            return 0, [], dict(loss_classifier=loss_classifier, loss_box_reg=loss_box_reg)
-
-        result = self.fastrcnn_inference(class_logits, box_regression, proposals)
-        return 0, result, {}
+        result, losses = self.fastrcnn_wrapup(class_logits, box_regression, proposals)
+        return 0, result, losses
