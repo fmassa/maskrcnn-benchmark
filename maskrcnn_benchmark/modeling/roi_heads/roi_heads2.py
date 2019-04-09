@@ -609,15 +609,8 @@ class StandardRoIHeads(torch.nn.Module):
             proposals: list[BoxList]
             targets: list[BoxList]
         """
-        # Get the device we're operating on
-        device = proposals[0].bbox.device
 
         gt_boxes = [target.copy_with_fields([]) for target in targets]
-
-        # later cat of bbox requires all fields to be present for all bbox
-        # so we need to add a dummy for objectness that's missing
-        for gt_box in gt_boxes:
-            gt_box.add_field("objectness", torch.ones(len(gt_box), device=device))
 
         proposals = [
             cat_boxlist((proposal, gt_box))
@@ -627,6 +620,9 @@ class StandardRoIHeads(torch.nn.Module):
         return proposals
 
     def forward(self, features, proposals, targets=None):
+        # remove all fields that might have been attached to the proposals
+        # they are not used by StandardRoIHeads
+        proposals = [p.copy_with_fields([]) for p in proposals]
         if self.training:
             assert targets is not None
             # append ground-truth bboxes to proposals
