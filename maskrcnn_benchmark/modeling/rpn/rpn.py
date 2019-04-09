@@ -55,7 +55,6 @@ from ..utils import cat
 
 from maskrcnn_benchmark.layers import smooth_l1_loss
 from maskrcnn_benchmark.modeling.matcher import Matcher
-from maskrcnn_benchmark.modeling.assign_target_to_proposal import Target2ProposalAssigner
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 from maskrcnn_benchmark.structures.boxlist_ops import cat_boxlist
 
@@ -159,7 +158,7 @@ def rpn_loss(objectness, box_regression, anchors, targets,
         fg_bg_sampler, box_coder, box_similarity, proposal_matcher, fields_to_keep, discard_cases):
     """
     Arguments:
-        anchors (list[BoxList])
+        anchors (list[list[BoxList]])
         objectness (list[Tensor])
         box_regression (list[Tensor])
         targets (list[BoxList])
@@ -186,7 +185,7 @@ def rpn_loss(objectness, box_regression, anchors, targets,
     objectness, box_regression = \
             concat_box_prediction_layers(objectness, box_regression)
 
-    objectness = objectness.squeeze()
+    objectness = objectness.squeeze(1)
 
     labels = torch.cat(labels, dim=0)
     regression_targets = torch.cat(regression_targets, dim=0)
@@ -288,6 +287,9 @@ class RPNInference(torch.nn.Module):
         concat_anchors = torch.cat([a.bbox for a in anchors], dim=0)
         concat_anchors = concat_anchors.reshape(N, -1, 4)
 
+        # TODO before we would first select the top_n and then decode
+        # doesn't seem to make a difference so I just switch
+        # the order to make things clearer
         proposals = self.box_coder.decode(
             box_regression.view(-1, 4), concat_anchors.view(-1, 4)
         )
@@ -337,7 +339,7 @@ class RPNInference(torch.nn.Module):
         result = self.filter_proposals(proposals, objectness, image_shapes)
         return result
 
-    def forward(self, anchors, objectness, box_regression, targets=None):
+    def forward(self, anchors, objectness, box_regression):
         """
         Arguments:
             anchors: list[list[BoxList]]
@@ -386,7 +388,7 @@ class RPNWrapUp(torch.nn.Module):
         self.proposal_matcher = proposal_matcher
         self.discard_cases = discard_cases
         self.fields_to_keep = fields_to_keep
-        self.box_selector = box_selector
+        self.rpn_inference = box_selector
         self.rpn_only = rpn_only
 
     def forward(self, objectness, box_regression, anchors, targets=None):
@@ -400,9 +402,7 @@ class RPNWrapUp(torch.nn.Module):
             else:
                 # For end-to-end models, anchors must be transformed into boxes and
                 # sampled into a training batch.
-                boxes = self.box_selector(
-                    anchors, objectness, box_regression, targets
-                )
+                boxes = self.rpn_inference(anchors, objectness, box_regression)
             loss_objectness, loss_rpn_box_reg = rpn_loss(
                     objectness, box_regression, anchors, targets, self.fg_bg_sampler, self.box_coder,
                     self.box_similarity, self.proposal_matcher, self.fields_to_keep, self.discard_cases)
@@ -412,7 +412,7 @@ class RPNWrapUp(torch.nn.Module):
             }
             return boxes, losses
 
-        boxes = self.box_selector(anchors, objectness, box_regression)
+        boxes = self.rpn_inference(anchors, objectness, box_regression)
         return boxes, {}
 
 
