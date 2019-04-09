@@ -3,16 +3,158 @@ import torch
 from torch.nn import functional as F
 from torch import nn
 
-from maskrcnn_benchmark.modeling import registry
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
-from maskrcnn_benchmark.modeling.rpn.retinanet.retinanet import build_retinanet
-# from .loss import make_rpn_loss_evaluator
-from .anchor_generator import make_anchor_generator
-# from .inference import make_rpn_postprocessor
+
+
+import math
+
+import torch
+from torch import nn
+
+from maskrcnn_benchmark.structures.bounding_box import BoxList
+
+
+class BufferList(nn.Module):
+    """
+    Similar to nn.ParameterList, but for buffers
+    """
+
+    def __init__(self, buffers=None):
+        super(BufferList, self).__init__()
+        if buffers is not None:
+            self.extend(buffers)
+
+    def extend(self, buffers):
+        offset = len(self)
+        for i, buffer in enumerate(buffers):
+            self.register_buffer(str(offset + i), buffer)
+        return self
+
+    def __len__(self):
+        return len(self._buffers)
+
+    def __iter__(self):
+        return iter(self._buffers.values())
+
+
+def generate_anchors(base_size, scales, aspect_ratios):
+    scales = torch.as_tensor(scales, dtype=torch.float32)
+    aspect_ratios = torch.as_tensor(aspect_ratios, dtype=torch.float32)
+    h_ratios = torch.sqrt(aspect_ratios)
+    w_ratios = 1 / h_ratios
+
+    ws = (w_ratios[:, None] * scales[None, :]).view(-1)
+    hs = (h_ratios[:, None] * scales[None, :]).view(-1)
+
+    base_anchors = torch.stack([
+        base_size - ws, base_size - hs, base_size + ws, base_size + hs
+    ], dim=1) / 2
+    return base_anchors.round()
+
+
+class AnchorGenerator(nn.Module):
+    """
+    For a set of image sizes and feature maps, computes a set
+    of anchors
+    """
+
+    def __init__(
+        self,
+        sizes=(128, 256, 512),
+        aspect_ratios=(0.5, 1.0, 2.0),
+        anchor_strides=(8, 16, 32),
+        straddle_thresh=0,
+    ):
+        super(AnchorGenerator, self).__init__()
+
+        if len(anchor_strides) == 1:
+            anchor_stride = anchor_strides[0]
+            cell_anchors = [
+                generate_anchors(anchor_stride, sizes, aspect_ratios)
+            ]
+        else:
+            if len(anchor_strides) != len(sizes):
+                raise RuntimeError("FPN should have #anchor_strides == #sizes")
+
+            cell_anchors = [
+                generate_anchors(
+                    anchor_stride,
+                    size if isinstance(size, (tuple, list)) else (size,),
+                    aspect_ratios
+                )
+                for anchor_stride, size in zip(anchor_strides, sizes)
+            ]
+        self.strides = anchor_strides
+        self.cell_anchors = BufferList(cell_anchors)
+        self.straddle_thresh = straddle_thresh
+
+    def num_anchors_per_location(self):
+        return [len(cell_anchors) for cell_anchors in self.cell_anchors]
+
+    def grid_anchors(self, grid_sizes):
+        anchors = []
+        for size, stride, base_anchors in zip(
+            grid_sizes, self.strides, self.cell_anchors
+        ):
+            grid_height, grid_width = size
+            device = base_anchors.device
+            shifts_x = torch.arange(
+                0, grid_width * stride, step=stride, dtype=torch.float32, device=device
+            )
+            shifts_y = torch.arange(
+                0, grid_height * stride, step=stride, dtype=torch.float32, device=device
+            )
+            shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x)
+            shift_x = shift_x.reshape(-1)
+            shift_y = shift_y.reshape(-1)
+            shifts = torch.stack((shift_x, shift_y, shift_x, shift_y), dim=1)
+
+            anchors.append(
+                (shifts.view(-1, 1, 4) + base_anchors.view(1, -1, 4)).reshape(-1, 4)
+            )
+
+        return anchors
+
+    def add_visibility_to(self, boxlist):
+        image_width, image_height = boxlist.size
+        anchors = boxlist.bbox
+        if self.straddle_thresh >= 0:
+            inds_inside = (
+                (anchors[..., 0] >= -self.straddle_thresh)
+                & (anchors[..., 1] >= -self.straddle_thresh)
+                & (anchors[..., 2] < image_width + self.straddle_thresh)
+                & (anchors[..., 3] < image_height + self.straddle_thresh)
+            )
+        else:
+            device = anchors.device
+            inds_inside = torch.ones(anchors.shape[0], dtype=torch.uint8, device=device)
+        boxlist.add_field("visibility", inds_inside)
+
+    def forward(self, image_list, feature_maps):
+        grid_sizes = [feature_map.shape[-2:] for feature_map in feature_maps]
+        anchors_over_all_feature_maps = self.grid_anchors(grid_sizes)
+        anchors = []
+        for i, (image_height, image_width) in enumerate(image_list.image_sizes):
+            anchors_in_image = []
+            for anchors_per_feature_map in anchors_over_all_feature_maps:
+                boxlist = BoxList(
+                    anchors_per_feature_map, (image_width, image_height), mode="xyxy"
+                )
+                self.add_visibility_to(boxlist)
+                anchors_in_image.append(boxlist)
+            anchors.append(anchors_in_image)
+        return anchors
 
 
 
-@registry.RPN_HEADS.register("SingleConvRPNHead")
+
+
+
+
+
+
+
+
 class RPNHead(nn.Module):
     """
     Adds a simple RPN Head with classification and regression heads
@@ -277,7 +419,6 @@ class RPNInference(torch.nn.Module):
 
     def regress_anchors(self, anchors, box_regression):
         # TODO make this return a BoxList?
-        device = box_regression.device
         N, Ax4, H, W = box_regression.shape
         A = Ax4 // 4
 
@@ -416,14 +557,41 @@ class RPNWrapUp(torch.nn.Module):
         return boxes, {}
 
 
-def make_rpn_postprocessor(config, rpn_box_coder):
-    fpn_post_nms_top_n = dict(
-            training=config.MODEL.RPN.FPN_POST_NMS_TOP_N_TRAIN, testing=config.MODEL.RPN.FPN_POST_NMS_TOP_N_TEST)
 
-    pre_nms_top_n = dict(training=config.MODEL.RPN.PRE_NMS_TOP_N_TRAIN, testing=config.MODEL.RPN.PRE_NMS_TOP_N_TEST)
-    post_nms_top_n = dict(training=config.MODEL.RPN.POST_NMS_TOP_N_TRAIN, testing=config.MODEL.RPN.POST_NMS_TOP_N_TEST)
-    nms_thresh = config.MODEL.RPN.NMS_THRESH
-    min_size = config.MODEL.RPN.MIN_SIZE
+def build_rpn(cfg, in_channels):
+    """
+    This gives the gist of it. Not super important because it doesn't change as much
+    """
+
+    anchor_sizes = cfg.MODEL.RPN.ANCHOR_SIZES
+    aspect_ratios = cfg.MODEL.RPN.ASPECT_RATIOS
+    anchor_stride = cfg.MODEL.RPN.ANCHOR_STRIDE
+    straddle_thresh = cfg.MODEL.RPN.STRADDLE_THRESH
+
+    if cfg.MODEL.RPN.USE_FPN:
+        assert len(anchor_stride) == len(
+            anchor_sizes
+        ), "FPN should have len(ANCHOR_STRIDE) == len(ANCHOR_SIZES)"
+    else:
+        assert len(anchor_stride) == 1, "Non-FPN should have a single ANCHOR_STRIDE"
+    anchor_generator = AnchorGenerator(
+        anchor_sizes, aspect_ratios, anchor_stride, straddle_thresh
+    )
+
+    head = RPNHead(
+        in_channels, anchor_generator.num_anchors_per_location()[0]
+    )
+
+    rpn_box_coder = BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
+
+
+    fpn_post_nms_top_n = dict(
+            training=cfg.MODEL.RPN.FPN_POST_NMS_TOP_N_TRAIN, testing=cfg.MODEL.RPN.FPN_POST_NMS_TOP_N_TEST)
+
+    pre_nms_top_n = dict(training=cfg.MODEL.RPN.PRE_NMS_TOP_N_TRAIN, testing=cfg.MODEL.RPN.PRE_NMS_TOP_N_TEST)
+    post_nms_top_n = dict(training=cfg.MODEL.RPN.POST_NMS_TOP_N_TRAIN, testing=cfg.MODEL.RPN.POST_NMS_TOP_N_TEST)
+    nms_thresh = cfg.MODEL.RPN.NMS_THRESH
+    min_size = cfg.MODEL.RPN.MIN_SIZE
     box_selector = RPNInference(
         pre_nms_top_n=pre_nms_top_n,
         post_nms_top_n=post_nms_top_n,
@@ -432,26 +600,6 @@ def make_rpn_postprocessor(config, rpn_box_coder):
         box_coder=rpn_box_coder,
         fpn_post_nms_top_n=fpn_post_nms_top_n,
     )
-    return box_selector
-
-def build_rpn(cfg, in_channels):
-    """
-    This gives the gist of it. Not super important because it doesn't change as much
-    """
-    if cfg.MODEL.RETINANET_ON:
-        return build_retinanet(cfg, in_channels)
-
-
-    anchor_generator = make_anchor_generator(cfg)
-
-    rpn_head = registry.RPN_HEADS[cfg.MODEL.RPN.RPN_HEAD]
-    head = rpn_head(
-        in_channels, anchor_generator.num_anchors_per_location()[0]
-    )
-
-    rpn_box_coder = BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
-
-    box_selector = make_rpn_postprocessor(cfg, rpn_box_coder)
 
     fg_iou_thresh = cfg.MODEL.RPN.FG_IOU_THRESHOLD
     bg_iou_thresh = cfg.MODEL.RPN.BG_IOU_THRESHOLD
