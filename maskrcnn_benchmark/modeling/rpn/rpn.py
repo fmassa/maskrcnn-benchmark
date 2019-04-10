@@ -482,9 +482,10 @@ class RPNInference(torch.nn.Module):
 
     def forward(self, anchors, objectness, box_regression):
         with torch.no_grad():
+            num_anchors = [len(a) for a in anchors[0]]
             anchors = [cat_boxlist(boxlist) for boxlist in anchors]
             N = len(anchors)
-            num_anchors = [len(a) for a in anchors[0]]
+
             objectness, box_regression = \
                     concat_box_prediction_layers(objectness, box_regression)
 
@@ -497,35 +498,41 @@ class RPNInference(torch.nn.Module):
                 box_regression.view(-1, 4), concat_anchors.view(-1, 4)
             )
 
-            objectness = objectness.reshape(N, -1)
-            proposals = proposals.view(N, -1, 4)
-            num_total_anchors = objectness.shape[1]
+            objectness_ = objectness.reshape(N, -1)
+            proposals_ = proposals.view(N, -1, 4)
+            num_total_anchors = objectness_.shape[1]
             image_shapes = [box.size for box in anchors]
 
-            pre_nms_top_n = min(self.pre_nms_top_n, num_total_anchors)
-            
+            final_result = []
+            for objectness, proposals in zip(objectness_.split(num_anchors, 1), proposals_.split(num_anchors, 1)):
+                num_anchors_ = objectness.shape[1]
+                pre_nms_top_n = min(self.pre_nms_top_n, num_anchors_)
 
-            objectness, topk_idx = objectness.topk(pre_nms_top_n, dim=1, sorted=True)
-            batch_idx = torch.arange(N, device=device)[:, None]
-            proposals = proposals[batch_idx, topk_idx]
+                objectness, topk_idx = objectness.topk(pre_nms_top_n, dim=1, sorted=True)
+                batch_idx = torch.arange(N, device=device)[:, None]
+                proposals = proposals[batch_idx, topk_idx]
 
+                result = []
+                for proposal, score, im_shape in zip(proposals, objectness, image_shapes):
+                    boxlist = BoxList(proposal, im_shape, mode="xyxy")
+                    boxlist.add_field("objectness", score)
+                    boxlist = boxlist.clip_to_image(remove_empty=False)
+                    boxlist = remove_small_boxes(boxlist, self.min_size)
+                    boxlist = boxlist_nms(
+                        boxlist,
+                        self.nms_thresh,
+                        max_proposals=self.post_nms_top_n,
+                        score_field="objectness",
+                    )
+                    result.append(boxlist)
+                final_result.append(result)
 
+            boxlists = list(zip(*final_result))
+            boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
 
-            result = []
-            for proposal, score, im_shape in zip(proposals, objectness, image_shapes):
-                boxlist = BoxList(proposal, im_shape, mode="xyxy")
-                boxlist.add_field("objectness", score)
-                boxlist = boxlist.clip_to_image(remove_empty=False)
-                boxlist = remove_small_boxes(boxlist, self.min_size)
-                boxlist = boxlist_nms(
-                    boxlist,
-                    self.nms_thresh,
-                    max_proposals=self.post_nms_top_n,
-                    score_field="objectness",
-                )
-                result.append(boxlist)
-
-        return result
+            if len(num_anchors) > 1:
+                boxlists = self.select_over_all_levels(boxlists)
+        return boxlists
 
 
     def forward0(self, anchors, objectness, box_regression):
