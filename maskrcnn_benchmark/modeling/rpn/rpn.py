@@ -481,6 +481,54 @@ class RPNInference(torch.nn.Module):
         return result
 
     def forward(self, anchors, objectness, box_regression):
+        with torch.no_grad():
+            anchors = [cat_boxlist(boxlist) for boxlist in anchors]
+            N = len(anchors)
+            num_anchors = [len(a) for a in anchors[0]]
+            objectness, box_regression = \
+                    concat_box_prediction_layers(objectness, box_regression)
+
+            device = objectness.device
+
+            concat_anchors = torch.cat([a.bbox for a in anchors], dim=0)
+            concat_anchors = concat_anchors.reshape(N, -1, 4)
+
+            proposals = self.box_coder.decode(
+                box_regression.view(-1, 4), concat_anchors.view(-1, 4)
+            )
+
+            objectness = objectness.reshape(N, -1)
+            proposals = proposals.view(N, -1, 4)
+            num_total_anchors = objectness.shape[1]
+            image_shapes = [box.size for box in anchors]
+
+            pre_nms_top_n = min(self.pre_nms_top_n, num_total_anchors)
+            
+
+            objectness, topk_idx = objectness.topk(pre_nms_top_n, dim=1, sorted=True)
+            batch_idx = torch.arange(N, device=device)[:, None]
+            proposals = proposals[batch_idx, topk_idx]
+
+
+
+            result = []
+            for proposal, score, im_shape in zip(proposals, objectness, image_shapes):
+                boxlist = BoxList(proposal, im_shape, mode="xyxy")
+                boxlist.add_field("objectness", score)
+                boxlist = boxlist.clip_to_image(remove_empty=False)
+                boxlist = remove_small_boxes(boxlist, self.min_size)
+                boxlist = boxlist_nms(
+                    boxlist,
+                    self.nms_thresh,
+                    max_proposals=self.post_nms_top_n,
+                    score_field="objectness",
+                )
+                result.append(boxlist)
+
+        return result
+
+
+    def forward0(self, anchors, objectness, box_regression):
         """
         Arguments:
             anchors: list[list[BoxList]]
