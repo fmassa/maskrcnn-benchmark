@@ -151,27 +151,3 @@ def build_roi_heads(cfg, in_channels):
             )
 
 
-from ..roi_heads.mask_head.mask_head import build_roi_mask_head
-from ..roi_heads.keypoint_head.keypoint_head import build_roi_keypoint_head
-from ..roi_heads.roi_heads import CombinedROIHeads
-def build_roi_heads0(cfg, in_channels):
-    # individually create the heads, that will be combined together
-    # afterwards
-    roi_heads = []
-    if cfg.MODEL.RETINANET_ON:
-        return []
-
-    if not cfg.MODEL.RPN_ONLY:
-        roi_heads.append(("box", build_roi_box_head(cfg, in_channels)))
-    if cfg.MODEL.MASK_ON:
-        roi_heads.append(("mask", build_roi_mask_head(cfg, in_channels)))
-    if cfg.MODEL.KEYPOINT_ON:
-        roi_heads.append(("keypoint", build_roi_keypoint_head(cfg, in_channels)))
-
-    # combine individual heads in a single module
-    if roi_heads:
-        roi_heads = CombinedROIHeads(roi_heads, cfg.MODEL.ROI_MASK_HEAD.SHARE_BOX_FEATURE_EXTRACTOR,
-            cfg.MODEL.ROI_KEYPOINT_HEAD.SHARE_BOX_FEATURE_EXTRACTOR)
-
-    return roi_heads
-

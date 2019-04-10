@@ -5,7 +5,7 @@ import torch
 from collections import OrderedDict
 from tqdm import tqdm
 
-from maskrcnn_benchmark.modeling.roi_heads.mask_head.inference import Masker
+from maskrcnn_benchmark.modeling.roi_heads.roi_heads2 import Masker
 from maskrcnn_benchmark.structures.bounding_box import BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 
