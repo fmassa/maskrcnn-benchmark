@@ -26,6 +26,24 @@ from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 
 
+def generic_filter_proposals(all_proposals, all_scores, image_shapes,
+                     split_dim0, split_dim1, pre_filter_fn, filter_fn):
+    # all_proposals: [K, C, 4]
+    # all_scores: [K, C]
+    final_result = []
+    for j, (proposals, scores) in enumerate(zip(all_proposals.split(split_dim1, 1), all_scores.split(split_dim1, 1))):
+        proposals, scores = pre_filter_fn(proposals, scores)
+        result = []
+        for p, s, im_shape in zip(proposals.split(split_dim0, 0), scores.split(split_dim0, 0), image_shapes):
+            boxlist = BoxList(p.reshape(-1, 4), im_shape, mode="xyxy")
+            boxlist = filter_fn(boxlist, s.flatten(), j)
+            result.append(boxlist)
+        final_result.append(result)
+
+    boxlists = list(zip(*final_result))
+    boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
+    return boxlists
+
 
 class BufferList(nn.Module):
     """
@@ -297,6 +315,30 @@ class RPN(torch.nn.Module):
         return proposals, objectness
 
     def filter_proposals(self, proposals_, objectness, image_shapes, num_anchors):
+        def filter_fn(boxlist, scores, j):
+            boxlist.add_field("objectness", scores)
+            boxlist = boxlist.clip_to_image(remove_empty=False)
+            boxlist = remove_small_boxes(boxlist, self.min_size)
+            boxlist = boxlist_nms(
+                boxlist,
+                self.nms_thresh,
+                max_proposals=self.post_nms_top_n,
+                score_field="objectness",
+            )
+            return boxlist
+
+        with torch.no_grad():
+            N = proposals_.shape[0]
+            objectness_ = objectness.reshape(N, -1)
+
+            boxlists = generic_filter_proposals(proposals_, objectness_, image_shapes, 1, num_anchors,
+                    self.select_top_n_pre_nms, filter_fn)
+
+            if len(num_anchors) > 1:
+                boxlists = self.select_over_all_levels(boxlists)
+        return boxlists
+
+    def filter_proposals0(self, proposals_, objectness, image_shapes, num_anchors):
         with torch.no_grad():
             N = proposals_.shape[0]
             objectness_ = objectness.reshape(N, -1)

@@ -22,6 +22,7 @@ from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
 )
 from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou  # move to BoxList
+from maskrcnn_benchmark.modeling.rpn.rpn import generic_filter_proposals  # TODO remove from there
 
 # Mask
 from maskrcnn_benchmark.modeling.make_layers import make_conv3x3
@@ -136,6 +137,8 @@ class FastRCNNInference(nn.Module):
         if self.cls_agnostic_bbox_reg:
             proposals = proposals.repeat(1, num_classes)
 
+        results = self.filter_proposals(proposals, class_prob, image_shapes, boxes_per_image)
+        """
         proposals = proposals.split(boxes_per_image, dim=0)
         class_prob = class_prob.split(boxes_per_image, dim=0)
 
@@ -147,7 +150,52 @@ class FastRCNNInference(nn.Module):
             boxlist = boxlist.clip_to_image(remove_empty=False)
             boxlist = self.filter_results(boxlist, num_classes)
             results.append(boxlist)
+        """
         return results
+
+    def filter_proposals(self, boxes, scores, image_shapes, boxes_per_image):
+        def pre_filter_fn(boxes, scores):
+            #inds = (scores.flatten() > self.score_thresh).nonzero().squeeze(1)
+            #boxes = boxes[inds]
+            #scores = scores[inds]
+            return boxes, scores
+
+        def filter_fn(boxlist, scores, j):
+            device = scores.device
+            inds = (scores.flatten() > self.score_thresh).nonzero().squeeze(1)
+            boxlist = boxlist[inds]
+            scores = scores[inds]
+            boxlist = boxlist.clip_to_image(remove_empty=False)
+            boxlist.add_field("scores", scores)
+            boxlist = boxlist_nms(
+                boxlist, self.nms
+            )
+            num_labels = len(boxlist)
+            boxlist.add_field(
+                "labels", torch.full((num_labels,), j + 1, dtype=torch.int64, device=device)
+            )
+            return boxlist
+
+        boxes = boxes.reshape(sum(boxes_per_image), -1, 4)
+        boxes = boxes[:, 1:]
+        scores = scores[:, 1:]
+        results = generic_filter_proposals(boxes, scores, image_shapes,
+                boxes_per_image, 1,
+                pre_filter_fn, filter_fn)
+
+        for i, result in enumerate(results):
+            number_of_detections = len(result)
+            # Limit to max_per_image detections **over all classes**
+            if number_of_detections > self.detections_per_img > 0:
+                cls_scores = result.get_field("scores")
+                image_thresh, _ = torch.kthvalue(
+                    cls_scores.cpu(), number_of_detections - self.detections_per_img + 1
+                )
+                keep = cls_scores >= image_thresh.item()
+                keep = torch.nonzero(keep).squeeze(1)
+                results[i] = result[keep]
+        return results
+
 
     def prepare_boxlist(self, boxes, scores, image_shape):
         """
