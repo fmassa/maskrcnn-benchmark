@@ -206,9 +206,6 @@ class RPN(torch.nn.Module):
             pre_nms_top_n, post_nms_top_n, nms_thresh):
         """
         Arguments:
-            proposal_matcher (Matcher)
-            fg_bg_sampler (BalancedPositiveNegativeSampler)
-            box_coder (BoxCoder)
         """
         super(RPN, self).__init__()
         self.anchor_generator = anchor_generator
@@ -250,7 +247,7 @@ class RPN(torch.nn.Module):
             labels_per_image = labels_per_image.to(dtype=torch.float32)
 
             # Background (negative examples)
-            bg_indices = matched_idxs == Matcher.BELOW_LOW_THRESHOLD
+            bg_indices = matched_idxs == self.proposal_matcher.BELOW_LOW_THRESHOLD
             labels_per_image[bg_indices] = 0
 
             # discard anchors that go out of the boundaries of the image
@@ -258,7 +255,7 @@ class RPN(torch.nn.Module):
             labels_per_image[~inds_inside] = -1
 
             # discard indices that are between thresholds
-            inds_to_discard = matched_idxs == Matcher.BETWEEN_THRESHOLDS
+            inds_to_discard = matched_idxs == self.proposal_matcher.BETWEEN_THRESHOLDS
             labels_per_image[inds_to_discard] = -1
 
             labels.append(labels_per_image)

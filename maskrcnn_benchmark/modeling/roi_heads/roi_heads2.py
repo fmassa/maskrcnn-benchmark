@@ -132,10 +132,9 @@ class FastRCNNInference(nn.Module):
         proposals = self.box_coder.decode(
             box_regression.view(sum(boxes_per_image), -1), concat_boxes
         )
-        if self.cls_agnostic_bbox_reg:
-            proposals = proposals.repeat(1, class_prob.shape[1])
-
         num_classes = class_prob.shape[1]
+        if self.cls_agnostic_bbox_reg:
+            proposals = proposals.repeat(1, num_classes)
 
         proposals = proposals.split(boxes_per_image, dim=0)
         class_prob = class_prob.split(boxes_per_image, dim=0)
@@ -213,34 +212,7 @@ class FastRCNNInference(nn.Module):
         return result
 
 
-class FastRCNNWrapUp(nn.Module):
-    def __init__(
-        self,
-        score_thresh=0.05,
-        nms_thresh=0.5,
-        detections_per_img=100,
-        bbox_reg_weights=None,
-        cls_agnostic_bbox_reg=False):
-        super(FastRCNNWrapUp, self).__init__()
-
-        self.box_coder = BoxCoder(bbox_reg_weights)
-        self.cls_agnostic_bbox_reg = cls_agnostic_bbox_reg
-
-        self.fastrcnn_inference = FastRCNNInference(score_thresh, nms_thresh,
-                detections_per_img, self.box_coder, cls_agnostic_bbox_reg)
-
-    def forward(self, class_logits, box_regression, proposals):
-        if self.training:
-            loss_classifier, loss_box_reg = fastrcnn_loss(
-                class_logits, box_regression, proposals,
-                self.box_coder, self.cls_agnostic_bbox_reg)
-            return [], dict(loss_classifier=loss_classifier, loss_box_reg=loss_box_reg)
-
-        result = self.fastrcnn_inference(class_logits, box_regression, proposals)
-        return result, {}
-
-
-def fastrcnn_loss(class_logits, box_regression, proposals, box_coder, cls_agnostic_bbox_reg=False):
+def fastrcnn_loss(class_logits, box_regression, proposals, box_coder):
     """
     Computes the loss for Faster R-CNN.
 
@@ -271,11 +243,8 @@ def fastrcnn_loss(class_logits, box_regression, proposals, box_coder, cls_agnost
     # advanced indexing
     sampled_pos_inds_subset = torch.nonzero(labels > 0).squeeze(1)
     labels_pos = labels[sampled_pos_inds_subset]
-    if cls_agnostic_bbox_reg:
-        map_inds = torch.tensor([4, 5, 6, 7], device=device)
-    else:
-        map_inds = 4 * labels_pos[:, None] + torch.tensor(
-            [0, 1, 2, 3], device=device)
+    map_inds = 4 * labels_pos[:, None] + torch.tensor(
+        [0, 1, 2, 3], device=device)
 
     box_loss = smooth_l1_loss(
         box_regression[sampled_pos_inds_subset[:, None], map_inds],
@@ -313,7 +282,7 @@ def keep_only_positive_boxes(boxes):
     return positive_boxes, positive_inds
 
 
-class MaskRCNNHeads(nn.Module):
+class MaskRCNNHeads(nn.ModuleDict):
     """
     Heads for FPN for classification
     """
@@ -330,21 +299,19 @@ class MaskRCNNHeads(nn.Module):
         input_size = in_channels
 
         next_feature = input_size
-        self.blocks = []
         for layer_idx, layer_features in enumerate(layers, 1):
             layer_name = "mask_fcn{}".format(layer_idx)
             module = make_conv3x3(
                 next_feature, layer_features,
                 dilation=dilation, stride=1, use_gn=use_gn
             )
-            self.add_module(layer_name, module)
+            self[layer_name] = module
             next_feature = layer_features
-            self.blocks.append(layer_name)
         self.out_channels = layer_features
 
     def forward(self, x):
-        for layer_name in self.blocks:
-            x = F.relu(getattr(self, layer_name)(x))
+        for module in self.values():
+            x = F.relu(module(x))
 
         return x
 
@@ -370,73 +337,45 @@ class MaskRCNNC4Predictor(nn.Module):
         return self.mask_fcn_logits(x)
 
 
-class MaskRCNNWrapUp(nn.Module):
-    def __init__(self, discretization_size):
-        super(MaskRCNNWrapUp, self).__init__()
-        self.discretization_size = discretization_size
-        self.maskrcnn_inference = MaskRCNNInference()
-
-    def forward(self, mask_logits, mask_proposals):
-        if self.training:
-            loss_mask = maskrcnn_loss(mask_logits, mask_proposals, self.discretization_size)
-            return [], dict(loss_mask=loss_mask)
-        result = self.maskrcnn_inference(mask_logits, mask_proposals)
-        return result, {}
-
-
-
 # TODO check if want to return a single BoxList or a composite
 # object
-class MaskRCNNInference(nn.Module):
+def maskrcnn_inference(x, boxes):
     """
     From the results of the CNN, post process the masks
     by taking the mask corresponding to the class with max
     probability (which are of fixed size and directly output
     by the CNN) and return the masks in the mask field of the BoxList.
 
-    If a masker object is passed, it will additionally
-    project the masks in the image according to the locations in boxes,
+    Arguments:
+        x (Tensor): the mask logits
+        boxes (list[BoxList]): bounding boxes that are used as
+            reference, one for ech image
+
+    Returns:
+        results (list[BoxList]): one BoxList for each image, containing
+            the extra field mask
     """
+    mask_prob = x.sigmoid()
 
-    def __init__(self, masker=None):
-        super(MaskRCNNInference, self).__init__()
-        self.masker = masker
+    # select masks coresponding to the predicted classes
+    num_masks = x.shape[0]
+    labels = [bbox.get_field("labels") for bbox in boxes]
+    labels = torch.cat(labels)
+    index = torch.arange(num_masks, device=labels.device)
+    mask_prob = mask_prob[index, labels][:, None]
 
-    def forward(self, x, boxes):
-        """
-        Arguments:
-            x (Tensor): the mask logits
-            boxes (list[BoxList]): bounding boxes that are used as
-                reference, one for ech image
+    boxes_per_image = [len(box) for box in boxes]
+    mask_prob = mask_prob.split(boxes_per_image, dim=0)
 
-        Returns:
-            results (list[BoxList]): one BoxList for each image, containing
-                the extra field mask
-        """
-        mask_prob = x.sigmoid()
+    results = []
+    for prob, box in zip(mask_prob, boxes):
+        bbox = BoxList(box.bbox, box.size, mode="xyxy")
+        for field in box.fields():
+            bbox.add_field(field, box.get_field(field))
+        bbox.add_field("mask", prob)
+        results.append(bbox)
 
-        # select masks coresponding to the predicted classes
-        num_masks = x.shape[0]
-        labels = [bbox.get_field("labels") for bbox in boxes]
-        labels = torch.cat(labels)
-        index = torch.arange(num_masks, device=labels.device)
-        mask_prob = mask_prob[index, labels][:, None]
-
-        boxes_per_image = [len(box) for box in boxes]
-        mask_prob = mask_prob.split(boxes_per_image, dim=0)
-
-        if self.masker:
-            mask_prob = self.masker(mask_prob, boxes)
-
-        results = []
-        for prob, box in zip(mask_prob, boxes):
-            bbox = BoxList(box.bbox, box.size, mode="xyxy")
-            for field in box.fields():
-                bbox.add_field(field, box.get_field(field))
-            bbox.add_field("mask", prob)
-            results.append(bbox)
-
-        return results
+    return results
 
 
 def project_masks_on_boxes(segmentation_masks, proposals, discretization_size):
@@ -536,7 +475,7 @@ def expand_masks(mask, padding):
     padded_mask[:, :, padding:-padding, padding:-padding] = mask
     return padded_mask, scale
 
-
+from maskrcnn_benchmark.layers.misc import interpolate
 def paste_mask_in_image(mask, box, im_h, im_w, thresh=0.5, padding=1):
     padded_mask, scale = expand_masks(mask[None], padding=padding)
     mask = padded_mask[0, 0]
@@ -618,7 +557,7 @@ class Masker(object):
 
 
 
-class StandardRoIHeads(torch.nn.Module):
+class RoIHeads(torch.nn.Module):
     def __init__(self, box_roi_pool, box_head,
             box_predictor,
             fg_iou_thresh, bg_iou_thresh,
@@ -635,7 +574,7 @@ class StandardRoIHeads(torch.nn.Module):
             mask_predictor=None,
             mask_discretization_size=None,
             ):
-        super(StandardRoIHeads, self).__init__()
+        super(RoIHeads, self).__init__()
 
         self.box_similarity = boxlist_iou
         # assign ground-truth boxes for each proposal
@@ -655,16 +594,16 @@ class StandardRoIHeads(torch.nn.Module):
         self.box_head = box_head
         self.box_predictor = box_predictor
 
-        self.fastrcnn_wrapup = FastRCNNWrapUp(score_thresh, nms_thresh,
-                detections_per_img, bbox_reg_weights, cls_agnostic_bbox_reg)
+        self.fastrcnn_inference = FastRCNNInference(score_thresh, nms_thresh,
+                detections_per_img, self.box_coder, cls_agnostic_bbox_reg)
 
-
+        # masks
         if mask_predictor is not None:
             self.fields_to_keep.append("masks")
         self.mask_roi_pool = mask_roi_pool
         self.mask_head = mask_head
         self.mask_predictor = mask_predictor
-        self.maskrcnn_wrapup = MaskRCNNWrapUp(mask_discretization_size)
+        self.mask_discretization_size = mask_discretization_size
 
     def assign_targets_to_proposals(self, proposals, targets):
         for proposals_per_image, targets_per_image in zip(proposals, targets):
@@ -732,7 +671,7 @@ class StandardRoIHeads(torch.nn.Module):
 
     def forward(self, features, proposals, targets=None):
         # remove all fields that might have been attached to the proposals
-        # they are not used by StandardRoIHeads
+        # they are not used by RoIHeads
         proposals = [p.copy_with_fields([]) for p in proposals]
         if self.training:
             assert targets is not None
@@ -746,19 +685,31 @@ class StandardRoIHeads(torch.nn.Module):
         box_features = self.box_head(box_features)
         class_logits, box_regression = self.box_predictor(box_features)
 
-        result, losses = self.fastrcnn_wrapup(class_logits, box_regression, proposals)
-
+        result, losses = [], {}
+        if self.training:
+            loss_classifier, loss_box_reg = fastrcnn_loss(
+                class_logits, box_regression, proposals,
+                self.box_coder)
+            losses = dict(loss_classifier=loss_classifier, loss_box_reg=loss_box_reg)
+        else:
+            result = self.fastrcnn_inference(class_logits, box_regression, proposals)
 
         if self.mask_predictor:
             mask_proposals = result
             if self.training:
                 # during training, only focus on positive boxes
-                # all_proposals = proposals
                 mask_proposals, positive_inds = keep_only_positive_boxes(proposals)
             mask_features = self.mask_roi_pool(features, mask_proposals)
             mask_features = self.mask_head(mask_features)
             mask_logits = self.mask_predictor(mask_features)
-            result, loss_mask = self.maskrcnn_wrapup(mask_logits, mask_proposals)
+
+            loss_mask = {}
+            if self.training:
+                loss_mask = maskrcnn_loss(mask_logits, mask_proposals, self.mask_discretization_size)
+                loss_mask = dict(loss_mask=loss_mask)
+            else:
+                result = maskrcnn_inference(mask_logits, mask_proposals)
+
             losses.update(loss_mask)
 
         return 0, result, losses
