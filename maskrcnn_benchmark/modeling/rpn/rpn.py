@@ -330,7 +330,7 @@ class RPN(torch.nn.Module):
         proposals = proposals[batch_idx, topk_idx]
         return proposals, objectness
 
-    def filter_proposals(self, proposals_, objectness, image_shapes, num_anchors):
+    def filter_proposals(self, proposals, objectness, image_shapes, num_anchors):
         def filter_fn(boxlist, scores, j):
             boxlist.add_field("objectness", scores)
             boxlist = boxlist.clip_to_image(remove_empty=False)
@@ -355,10 +355,10 @@ class RPN(torch.nn.Module):
             return boxlist[inds_sorted]
 
         with torch.no_grad():
-            N = proposals_.shape[0]
-            objectness_ = objectness.reshape(N, -1)
+            N = proposals.shape[0]
+            objectness = objectness.reshape(N, -1)
 
-            boxlists = generic_filter_proposals(proposals_, objectness_, image_shapes, 1, num_anchors,
+            boxlists = generic_filter_proposals(proposals, objectness, image_shapes, 1, num_anchors,
                     self.select_top_n_pre_nms, filter_fn, post_filter_fn)
 
         return boxlists

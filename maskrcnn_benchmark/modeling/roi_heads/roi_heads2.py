@@ -92,7 +92,6 @@ class FastRCNNInference(nn.Module):
         nms=0.5,
         detections_per_img=100,
         box_coder=None,
-        cls_agnostic_bbox_reg=False
     ):
         """
         Arguments:
@@ -108,7 +107,6 @@ class FastRCNNInference(nn.Module):
         if box_coder is None:
             box_coder = BoxCoder(weights=(10., 10., 5., 5.))
         self.box_coder = box_coder
-        self.cls_agnostic_bbox_reg = cls_agnostic_bbox_reg
 
     def forward(self, class_logits, box_regression, boxes):
         """
@@ -128,12 +126,15 @@ class FastRCNNInference(nn.Module):
         image_shapes = [box.size for box in boxes]
         boxes_per_image = [len(box) for box in boxes]
 
-        if self.cls_agnostic_bbox_reg:
+        num_classes = class_prob.shape[1]
+        cls_agnostic_bbox_reg = box_regression.shape[1] // 4 != num_classes
+
+        if cls_agnostic_bbox_reg:
             box_regression = box_regression[:, -4:]
 
         proposals = apply_deltas_to_boxlists(boxes, box_regression, self.box_coder)
-        num_classes = class_prob.shape[1]
-        if self.cls_agnostic_bbox_reg:
+
+        if cls_agnostic_bbox_reg:
             proposals = proposals.repeat(1, num_classes)
 
         results = self.filter_proposals(proposals, class_prob, image_shapes, boxes_per_image)
@@ -527,16 +528,18 @@ class Masker(object):
 
 
 class RoIHeads(torch.nn.Module):
-    def __init__(self, box_roi_pool, box_head,
+    def __init__(self,
+            box_roi_pool,
+            box_head,
             box_predictor,
+            # Faster R-CNN training
             fg_iou_thresh, bg_iou_thresh,
             batch_size_per_image, positive_fraction,
             bbox_reg_weights,
-            #
+            # Faster R-CNN inference
             score_thresh,
             nms_thresh,
             detections_per_img,
-            cls_agnostic_bbox_reg,
             # Mask
             mask_roi_pool=None,
             mask_head=None,
@@ -564,7 +567,7 @@ class RoIHeads(torch.nn.Module):
         self.box_predictor = box_predictor
 
         self.fastrcnn_inference = FastRCNNInference(score_thresh, nms_thresh,
-                detections_per_img, self.box_coder, cls_agnostic_bbox_reg)
+                detections_per_img, self.box_coder)
 
         # masks
         if mask_predictor is not None:
@@ -681,4 +684,4 @@ class RoIHeads(torch.nn.Module):
 
             losses.update(loss_mask)
 
-        return 0, result, losses
+        return result, losses

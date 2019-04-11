@@ -63,18 +63,13 @@ class GeneralizedRCNN(nn.Module):
         images = to_image_list(images)
         features = self.backbone(images.tensors)
         proposals, proposal_losses = self.rpn(images, features, targets)
-        if self.roi_heads:
-            x, result, detector_losses = self.roi_heads(features, proposals, targets)
-        else:
-            # RPN-only models don't have roi_heads
-            x = features
-            result = proposals
-            detector_losses = {}
+        result, detector_losses = self.roi_heads(features, proposals, targets)
+
+        losses = {}
+        losses.update(detector_losses)
+        losses.update(proposal_losses)
 
         if self.training:
-            losses = {}
-            losses.update(detector_losses)
-            losses.update(proposal_losses)
             return losses
 
         return result

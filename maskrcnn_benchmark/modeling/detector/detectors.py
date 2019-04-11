@@ -82,7 +82,6 @@ def build_roi_heads(cfg, in_channels):
             score_thresh,
             nms_thresh,
             detections_per_img,
-            cls_agnostic_bbox_reg,
             # Mask
             mask_pooler,
             mask_head,
