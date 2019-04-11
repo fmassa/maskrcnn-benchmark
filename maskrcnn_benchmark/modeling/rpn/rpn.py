@@ -331,7 +331,7 @@ class RPN(torch.nn.Module):
         return proposals, objectness
 
     def filter_proposals(self, proposals, objectness, image_shapes, num_anchors):
-        def filter_fn(boxlist, scores, j):
+        def clip_and_nms(boxlist, scores, j):
             boxlist.add_field("objectness", scores)
             boxlist = boxlist.clip_to_image(remove_empty=False)
             boxlist = remove_small_boxes(boxlist, self.min_size)
@@ -343,7 +343,7 @@ class RPN(torch.nn.Module):
             )
             return boxlist
 
-        def post_filter_fn(boxlist):
+        def limit_max_proposals(boxlist):
             num_boxes = len(boxlist)
             post_nms_top_n = min(self.post_nms_top_n, num_boxes)
             if num_boxes <= post_nms_top_n:
@@ -359,7 +359,7 @@ class RPN(torch.nn.Module):
             objectness = objectness.reshape(N, -1)
 
             boxlists = generic_filter_proposals(proposals, objectness, image_shapes, 1, num_anchors,
-                    self.select_top_n_pre_nms, filter_fn, post_filter_fn)
+                    self.select_top_n_pre_nms, clip_and_nms, limit_max_proposals)
 
         return boxlists
 

@@ -79,107 +79,86 @@ class FastRCNNPredictor(nn.Module):
         return scores, bbox_deltas
 
 
-class FastRCNNInference(nn.Module):
+def fastrcnn_inference(class_logits, box_regression, boxes,
+        score_thresh=0.05, nms_thresh=0.5, detections_per_img=100, box_coder=None):
     """
     From a set of classification scores, box regression and proposals,
     computes the post-processed boxes, and applies NMS to obtain the
     final results
+
+    Arguments:
+        x (tuple[tensor, tensor]): x contains the class logits
+            and the box_regression from the model.
+        boxes (list[BoxList]): bounding boxes that are used as
+            reference, one for ech image
+        score_thresh (float)
+        nms (float)
+        detections_per_img (int)
+        box_coder (BoxCoder)
+
+    Returns:
+        results (list[BoxList]): one BoxList for each image, containing
+            the extra fields labels and scores
     """
+    if box_coder is None:
+        box_coder = BoxCoder(weights=(10., 10., 5., 5.))
 
-    def __init__(
-        self,
-        score_thresh=0.05,
-        nms=0.5,
-        detections_per_img=100,
-        box_coder=None,
-    ):
-        """
-        Arguments:
-            score_thresh (float)
-            nms (float)
-            detections_per_img (int)
-            box_coder (BoxCoder)
-        """
-        super(FastRCNNInference, self).__init__()
-        self.score_thresh = score_thresh
-        self.nms = nms
-        self.detections_per_img = detections_per_img
-        if box_coder is None:
-            box_coder = BoxCoder(weights=(10., 10., 5., 5.))
-        self.box_coder = box_coder
+    class_prob = F.softmax(class_logits, -1)
 
-    def forward(self, class_logits, box_regression, boxes):
-        """
-        Arguments:
-            x (tuple[tensor, tensor]): x contains the class logits
-                and the box_regression from the model.
-            boxes (list[BoxList]): bounding boxes that are used as
-                reference, one for ech image
+    # TODO think about a representation of batch of boxes
+    image_shapes = [box.size for box in boxes]
+    boxes_per_image = [len(box) for box in boxes]
 
-        Returns:
-            results (list[BoxList]): one BoxList for each image, containing
-                the extra fields labels and scores
-        """
-        class_prob = F.softmax(class_logits, -1)
+    num_classes = class_prob.shape[1]
+    cls_agnostic_bbox_reg = box_regression.shape[1] // 4 != num_classes
 
-        # TODO think about a representation of batch of boxes
-        image_shapes = [box.size for box in boxes]
-        boxes_per_image = [len(box) for box in boxes]
+    if cls_agnostic_bbox_reg:
+        box_regression = box_regression[:, -4:]
 
-        num_classes = class_prob.shape[1]
-        cls_agnostic_bbox_reg = box_regression.shape[1] // 4 != num_classes
+    proposals = apply_deltas_to_boxlists(boxes, box_regression, box_coder)
 
-        if cls_agnostic_bbox_reg:
-            box_regression = box_regression[:, -4:]
+    if cls_agnostic_bbox_reg:
+        proposals = proposals.repeat(1, num_classes)
 
-        proposals = apply_deltas_to_boxlists(boxes, box_regression, self.box_coder)
+    """Returns bounding-box detection results by thresholding on scores and
+    applying non-maximum suppression (NMS).
+    """
+    def threshold_and_nms(boxlist, scores, j):
+        device = scores.device
+        inds = (scores > score_thresh).nonzero().squeeze(1)
+        boxlist = boxlist[inds]
+        scores = scores[inds]
+        boxlist = boxlist.clip_to_image(remove_empty=False)
+        boxlist.add_field("scores", scores)
+        boxlist = boxlist_nms(
+            boxlist, nms_thresh
+        )
+        num_labels = len(boxlist)
+        boxlist.add_field(
+            "labels", torch.full((num_labels,), j + 1, dtype=torch.int64, device=device)
+        )
+        return boxlist
 
-        if cls_agnostic_bbox_reg:
-            proposals = proposals.repeat(1, num_classes)
-
-        results = self.filter_proposals(proposals, class_prob, image_shapes, boxes_per_image)
-        return results
-
-    def filter_proposals(self, boxes, scores, image_shapes, boxes_per_image):
-        """Returns bounding-box detection results by thresholding on scores and
-        applying non-maximum suppression (NMS).
-        """
-        def filter_fn(boxlist, scores, j):
-            device = scores.device
-            inds = (scores > self.score_thresh).nonzero().squeeze(1)
-            boxlist = boxlist[inds]
-            scores = scores[inds]
-            boxlist = boxlist.clip_to_image(remove_empty=False)
-            boxlist.add_field("scores", scores)
-            boxlist = boxlist_nms(
-                boxlist, self.nms
+    def limit_max_detections(boxlist):
+        number_of_detections = len(boxlist)
+        # Limit to max_per_image detections **over all classes**
+        if number_of_detections > detections_per_img > 0:
+            cls_scores = boxlist.get_field("scores")
+            image_thresh, _ = torch.kthvalue(
+                cls_scores.cpu(), number_of_detections - detections_per_img + 1
             )
-            num_labels = len(boxlist)
-            boxlist.add_field(
-                "labels", torch.full((num_labels,), j + 1, dtype=torch.int64, device=device)
-            )
-            return boxlist
+            keep = cls_scores >= image_thresh.item()
+            keep = torch.nonzero(keep).squeeze(1)
+            boxlist = boxlist[keep]
+        return boxlist
 
-        def post_filter_fn(boxlist):
-            number_of_detections = len(boxlist)
-            # Limit to max_per_image detections **over all classes**
-            if number_of_detections > self.detections_per_img > 0:
-                cls_scores = boxlist.get_field("scores")
-                image_thresh, _ = torch.kthvalue(
-                    cls_scores.cpu(), number_of_detections - self.detections_per_img + 1
-                )
-                keep = cls_scores >= image_thresh.item()
-                keep = torch.nonzero(keep).squeeze(1)
-                boxlist = boxlist[keep]
-            return boxlist
+    proposals = proposals.reshape(sum(boxes_per_image), -1, 4)
+    proposals = proposals[:, 1:]
+    class_prob = class_prob[:, 1:]
+    results = generic_filter_proposals(proposals, class_prob, image_shapes,
+            boxes_per_image, 1, filter_fn=threshold_and_nms, post_filter_fn=limit_max_detections)
 
-        boxes = boxes.reshape(sum(boxes_per_image), -1, 4)
-        boxes = boxes[:, 1:]
-        scores = scores[:, 1:]
-        results = generic_filter_proposals(boxes, scores, image_shapes,
-                boxes_per_image, 1, filter_fn=filter_fn, post_filter_fn=post_filter_fn)
-
-        return results
+    return results
 
 
 def fastrcnn_loss(class_logits, box_regression, proposals, box_coder):
@@ -566,8 +545,9 @@ class RoIHeads(torch.nn.Module):
         self.box_head = box_head
         self.box_predictor = box_predictor
 
-        self.fastrcnn_inference = FastRCNNInference(score_thresh, nms_thresh,
-                detections_per_img, self.box_coder)
+        self.score_thresh = score_thresh
+        self.nms_thresh = nms_thresh
+        self.detections_per_img = detections_per_img
 
         # masks
         if mask_predictor is not None:
@@ -664,7 +644,8 @@ class RoIHeads(torch.nn.Module):
                 self.box_coder)
             losses = dict(loss_classifier=loss_classifier, loss_box_reg=loss_box_reg)
         else:
-            result = self.fastrcnn_inference(class_logits, box_regression, proposals)
+            result = fastrcnn_inference(class_logits, box_regression, proposals,
+                    self.score_thresh, self.nms_thresh, self.detections_per_img, self.box_coder)
 
         if self.mask_predictor:
             mask_proposals = result
