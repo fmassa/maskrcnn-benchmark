@@ -23,6 +23,7 @@ from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
 from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou  # move to BoxList
 from maskrcnn_benchmark.modeling.rpn.rpn import generic_filter_proposals  # TODO remove from there
+from maskrcnn_benchmark.modeling.rpn.rpn import apply_deltas_to_boxlists  # TODO remove from there
 
 # Mask
 from maskrcnn_benchmark.modeling.make_layers import make_conv3x3
@@ -126,43 +127,25 @@ class FastRCNNInference(nn.Module):
         # TODO think about a representation of batch of boxes
         image_shapes = [box.size for box in boxes]
         boxes_per_image = [len(box) for box in boxes]
-        concat_boxes = torch.cat([a.bbox for a in boxes], dim=0)
 
         if self.cls_agnostic_bbox_reg:
             box_regression = box_regression[:, -4:]
-        proposals = self.box_coder.decode(
-            box_regression.view(sum(boxes_per_image), -1), concat_boxes
-        )
+
+        proposals = apply_deltas_to_boxlists(boxes, box_regression, self.box_coder)
         num_classes = class_prob.shape[1]
         if self.cls_agnostic_bbox_reg:
             proposals = proposals.repeat(1, num_classes)
 
         results = self.filter_proposals(proposals, class_prob, image_shapes, boxes_per_image)
-        """
-        proposals = proposals.split(boxes_per_image, dim=0)
-        class_prob = class_prob.split(boxes_per_image, dim=0)
-
-        results = []
-        for prob, boxes_per_img, image_shape in zip(
-            class_prob, proposals, image_shapes
-        ):
-            boxlist = self.prepare_boxlist(boxes_per_img, prob, image_shape)
-            boxlist = boxlist.clip_to_image(remove_empty=False)
-            boxlist = self.filter_results(boxlist, num_classes)
-            results.append(boxlist)
-        """
         return results
 
     def filter_proposals(self, boxes, scores, image_shapes, boxes_per_image):
-        def pre_filter_fn(boxes, scores):
-            #inds = (scores.flatten() > self.score_thresh).nonzero().squeeze(1)
-            #boxes = boxes[inds]
-            #scores = scores[inds]
-            return boxes, scores
-
+        """Returns bounding-box detection results by thresholding on scores and
+        applying non-maximum suppression (NMS).
+        """
         def filter_fn(boxlist, scores, j):
             device = scores.device
-            inds = (scores.flatten() > self.score_thresh).nonzero().squeeze(1)
+            inds = (scores > self.score_thresh).nonzero().squeeze(1)
             boxlist = boxlist[inds]
             scores = scores[inds]
             boxlist = boxlist.clip_to_image(remove_empty=False)
@@ -176,88 +159,26 @@ class FastRCNNInference(nn.Module):
             )
             return boxlist
 
-        boxes = boxes.reshape(sum(boxes_per_image), -1, 4)
-        boxes = boxes[:, 1:]
-        scores = scores[:, 1:]
-        results = generic_filter_proposals(boxes, scores, image_shapes,
-                boxes_per_image, 1,
-                pre_filter_fn, filter_fn)
-
-        for i, result in enumerate(results):
-            number_of_detections = len(result)
+        def post_filter_fn(boxlist):
+            number_of_detections = len(boxlist)
             # Limit to max_per_image detections **over all classes**
             if number_of_detections > self.detections_per_img > 0:
-                cls_scores = result.get_field("scores")
+                cls_scores = boxlist.get_field("scores")
                 image_thresh, _ = torch.kthvalue(
                     cls_scores.cpu(), number_of_detections - self.detections_per_img + 1
                 )
                 keep = cls_scores >= image_thresh.item()
                 keep = torch.nonzero(keep).squeeze(1)
-                results[i] = result[keep]
+                boxlist = boxlist[keep]
+            return boxlist
+
+        boxes = boxes.reshape(sum(boxes_per_image), -1, 4)
+        boxes = boxes[:, 1:]
+        scores = scores[:, 1:]
+        results = generic_filter_proposals(boxes, scores, image_shapes,
+                boxes_per_image, 1, filter_fn=filter_fn, post_filter_fn=post_filter_fn)
+
         return results
-
-
-    def prepare_boxlist(self, boxes, scores, image_shape):
-        """
-        Returns BoxList from `boxes` and adds probability scores information
-        as an extra field
-        `boxes` has shape (#detections, 4 * #classes), where each row represents
-        a list of predicted bounding boxes for each of the object classes in the
-        dataset (including the background class). The detections in each row
-        originate from the same object proposal.
-        `scores` has shape (#detection, #classes), where each row represents a list
-        of object detection confidence scores for each of the object classes in the
-        dataset (including the background class). `scores[i, j]`` corresponds to the
-        box at `boxes[i, j * 4:(j + 1) * 4]`.
-        """
-        boxes = boxes.reshape(-1, 4)
-        scores = scores.reshape(-1)
-        boxlist = BoxList(boxes, image_shape, mode="xyxy")
-        boxlist.add_field("scores", scores)
-        return boxlist
-
-    def filter_results(self, boxlist, num_classes):
-        """Returns bounding-box detection results by thresholding on scores and
-        applying non-maximum suppression (NMS).
-        """
-        # unwrap the boxlist to avoid additional overhead.
-        # if we had multi-class NMS, we could perform this directly on the boxlist
-        boxes = boxlist.bbox.reshape(-1, num_classes * 4)
-        scores = boxlist.get_field("scores").reshape(-1, num_classes)
-
-        device = scores.device
-        result = []
-        # Apply threshold on detection probabilities and apply NMS
-        # Skip j = 0, because it's the background class
-        inds_all = scores > self.score_thresh
-        for j in range(1, num_classes):
-            inds = inds_all[:, j].nonzero().squeeze(1)
-            scores_j = scores[inds, j]
-            boxes_j = boxes[inds, j * 4 : (j + 1) * 4]
-            boxlist_for_class = BoxList(boxes_j, boxlist.size, mode="xyxy")
-            boxlist_for_class.add_field("scores", scores_j)
-            boxlist_for_class = boxlist_nms(
-                boxlist_for_class, self.nms
-            )
-            num_labels = len(boxlist_for_class)
-            boxlist_for_class.add_field(
-                "labels", torch.full((num_labels,), j, dtype=torch.int64, device=device)
-            )
-            result.append(boxlist_for_class)
-
-        result = cat_boxlist(result)
-        number_of_detections = len(result)
-
-        # Limit to max_per_image detections **over all classes**
-        if number_of_detections > self.detections_per_img > 0:
-            cls_scores = result.get_field("scores")
-            image_thresh, _ = torch.kthvalue(
-                cls_scores.cpu(), number_of_detections - self.detections_per_img + 1
-            )
-            keep = cls_scores >= image_thresh.item()
-            keep = torch.nonzero(keep).squeeze(1)
-            result = result[keep]
-        return result
 
 
 def fastrcnn_loss(class_logits, box_regression, proposals, box_coder):

@@ -26,22 +26,43 @@ from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 
 
+def apply_deltas_to_boxlists(boxlists, pred_bbox_deltas, box_coder):
+    """
+    Arguments:
+        boxlists (List[BoxList])
+        pred_bbox_deltas (Tensor)
+    """
+    with torch.no_grad():
+        boxes_per_image = [len(boxlist) for boxlist in boxlists]
+        concat_anchors = torch.cat([a.bbox for a in boxlists], dim=0)
+
+        proposals = box_coder.decode(
+            pred_bbox_deltas.view(sum(boxes_per_image), -1), concat_anchors
+        )
+        return proposals
+
+
 def generic_filter_proposals(all_proposals, all_scores, image_shapes,
-                     split_dim0, split_dim1, pre_filter_fn, filter_fn):
+                     split_dim0, split_dim1, pre_filter_fn=None, filter_fn=None, post_filter_fn=None):
     # all_proposals: [K, C, 4]
     # all_scores: [K, C]
     final_result = []
     for j, (proposals, scores) in enumerate(zip(all_proposals.split(split_dim1, 1), all_scores.split(split_dim1, 1))):
-        proposals, scores = pre_filter_fn(proposals, scores)
+        if pre_filter_fn is not None:
+            proposals, scores = pre_filter_fn(proposals, scores)
         result = []
         for p, s, im_shape in zip(proposals.split(split_dim0, 0), scores.split(split_dim0, 0), image_shapes):
             boxlist = BoxList(p.reshape(-1, 4), im_shape, mode="xyxy")
-            boxlist = filter_fn(boxlist, s.flatten(), j)
+            if filter_fn is not None:
+                boxlist = filter_fn(boxlist, s.flatten(), j)
             result.append(boxlist)
         final_result.append(result)
 
     boxlists = list(zip(*final_result))
     boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
+    if post_filter_fn is not None:
+        for i, boxlist in enumerate(boxlists):
+            boxlists[i] = post_filter_fn(boxlist)
     return boxlists
 
 
@@ -293,15 +314,10 @@ class RPN(torch.nn.Module):
         return self._post_nms_top_n['testing']
 
     def apply_deltas_to_anchors(self, anchors, pred_bbox_deltas):
-        with torch.no_grad():
-            N = len(anchors)
-            concat_anchors = torch.cat([a.bbox for a in anchors], dim=0)
-
-            proposals = self.box_coder.decode(
-                pred_bbox_deltas, concat_anchors
-            )
-            proposals = proposals.view(N, -1, 4)
-            return proposals
+        N = len(anchors)
+        proposals = apply_deltas_to_boxlists(anchors, pred_bbox_deltas, self.box_coder)
+        proposals = proposals.view(N, -1, 4)
+        return proposals
 
     def select_top_n_pre_nms(self, proposals, objectness):
         N = proposals.shape[0]
@@ -327,57 +343,24 @@ class RPN(torch.nn.Module):
             )
             return boxlist
 
+        def post_filter_fn(boxlist):
+            num_boxes = len(boxlist)
+            post_nms_top_n = min(self.post_nms_top_n, num_boxes)
+            if num_boxes <= post_nms_top_n:
+                return boxlist
+            objectness = boxlist.get_field("objectness")
+            _, inds_sorted = torch.topk(
+                objectness, post_nms_top_n, dim=0, sorted=True
+            )
+            return boxlist[inds_sorted]
+
         with torch.no_grad():
             N = proposals_.shape[0]
             objectness_ = objectness.reshape(N, -1)
 
             boxlists = generic_filter_proposals(proposals_, objectness_, image_shapes, 1, num_anchors,
-                    self.select_top_n_pre_nms, filter_fn)
+                    self.select_top_n_pre_nms, filter_fn, post_filter_fn)
 
-            if len(num_anchors) > 1:
-                boxlists = self.select_over_all_levels(boxlists)
-        return boxlists
-
-    def filter_proposals0(self, proposals_, objectness, image_shapes, num_anchors):
-        with torch.no_grad():
-            N = proposals_.shape[0]
-            objectness_ = objectness.reshape(N, -1)
-
-            final_result = []
-            for objectness, proposals in zip(objectness_.split(num_anchors, 1), proposals_.split(num_anchors, 1)):
-                proposals, objectness = self.select_top_n_pre_nms(proposals, objectness)
-
-                result = []
-                for proposal, score, im_shape in zip(proposals, objectness, image_shapes):
-                    boxlist = BoxList(proposal, im_shape, mode="xyxy")
-                    boxlist.add_field("objectness", score)
-                    boxlist = boxlist.clip_to_image(remove_empty=False)
-                    boxlist = remove_small_boxes(boxlist, self.min_size)
-                    boxlist = boxlist_nms(
-                        boxlist,
-                        self.nms_thresh,
-                        max_proposals=self.post_nms_top_n,
-                        score_field="objectness",
-                    )
-                    result.append(boxlist)
-                final_result.append(result)
-
-            boxlists = list(zip(*final_result))
-            boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
-
-            if len(num_anchors) > 1:
-                boxlists = self.select_over_all_levels(boxlists)
-        return boxlists
-
-    def select_over_all_levels(self, boxlists):
-        num_images = len(boxlists)
-        for i in range(num_images):
-            objectness = boxlists[i].get_field("objectness")
-            post_nms_top_n = min(self.post_nms_top_n, len(objectness))
-            _, inds_sorted = torch.topk(
-                objectness, post_nms_top_n, dim=0, sorted=True
-            )
-            boxlists[i] = boxlists[i][inds_sorted]
         return boxlists
 
     def map_targets_to_deltas(self, anchors, matched_gt_boxes):
