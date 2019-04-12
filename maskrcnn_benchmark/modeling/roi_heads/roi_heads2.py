@@ -632,7 +632,7 @@ class RoIHeads(torch.nn.Module):
             assert targets is not None
             assert all(t.has_field("labels") for t in targets)
             if self.has_masks:
-                assert all(t.has_field("masks"), for t in targets)
+                assert all(t.has_field("masks") for t in targets)
 
             # append ground-truth bboxes to proposals
             proposals = self.add_gt_proposals(proposals, targets)
