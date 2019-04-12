@@ -17,9 +17,9 @@ from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms
 from maskrcnn_benchmark.structures.boxlist_ops import remove_small_boxes
 
 
-from .utils import concat_box_prediction_layers
+from maskrcnn_benchmark.modeling.rpn.utils import concat_box_prediction_layers
 
-from ..balanced_positive_negative_sampler import BalancedPositiveNegativeSampler
+from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import BalancedPositiveNegativeSampler
 
 from maskrcnn_benchmark.layers import smooth_l1_loss
 from maskrcnn_benchmark.modeling.matcher import Matcher
