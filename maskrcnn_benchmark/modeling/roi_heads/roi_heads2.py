@@ -288,8 +288,6 @@ class MaskRCNNC4Predictor(nn.Module):
         return self.mask_fcn_logits(x)
 
 
-# TODO check if want to return a single BoxList or a composite
-# object
 def maskrcnn_inference(x, boxes):
     """
     From the results of the CNN, post process the masks
@@ -551,9 +549,12 @@ class RoIHeads(torch.nn.Module):
         self.nms_thresh = nms_thresh
         self.detections_per_img = detections_per_img
 
+        self.has_mask = False
+
         # masks
         if mask_predictor is not None:
             self.target_fields_to_keep.append("masks")
+            self.has_mask = True
         self.mask_roi_pool = mask_roi_pool
         self.mask_head = mask_head
         self.mask_predictor = mask_predictor
@@ -563,7 +564,8 @@ class RoIHeads(torch.nn.Module):
         for proposals_per_image, targets_per_image in zip(proposals, targets):
             match_quality_matrix = self.box_similarity(targets_per_image, proposals_per_image)
             matched_idxs = self.proposal_matcher(match_quality_matrix)
-            # Fast RCNN only need "labels" field for selecting the targets
+            # Fast R-CNN only need "labels" field for selecting the targets
+            # while Mask R-CNN also requires "masks"
             targets_per_image = targets_per_image.copy_with_fields(self.target_fields_to_keep)
             # get the targets corresponding GT for each proposal
             # NB: need to clamp the indices because we can have a single
@@ -628,6 +630,10 @@ class RoIHeads(torch.nn.Module):
         proposals = [p.copy_with_fields([]) for p in proposals]
         if self.training:
             assert targets is not None
+            assert all(t.has_field("labels") for t in targets)
+            if self.has_masks:
+                assert all(t.has_field("masks"), for t in targets)
+
             # append ground-truth bboxes to proposals
             proposals = self.add_gt_proposals(proposals, targets)
 
@@ -648,7 +654,7 @@ class RoIHeads(torch.nn.Module):
             result = fastrcnn_inference(class_logits, box_regression, proposals,
                     self.score_thresh, self.nms_thresh, self.detections_per_img, self.box_coder)
 
-        if self.mask_predictor:
+        if self.has_mask:
             mask_proposals = result
             if self.training:
                 # during training, only focus on positive boxes
