@@ -153,6 +153,7 @@ def fastrcnn_inference(class_logits, box_regression, boxes,
         return boxlist
 
     proposals = proposals.reshape(sum(boxes_per_image), -1, 4)
+    # remove predictions with the background label
     proposals = proposals[:, 1:]
     class_prob = class_prob[:, 1:]
     results = generic_filter_proposals(proposals, class_prob, image_shapes,
@@ -192,11 +193,12 @@ def fastrcnn_loss(class_logits, box_regression, proposals, box_coder):
     # advanced indexing
     sampled_pos_inds_subset = torch.nonzero(labels > 0).squeeze(1)
     labels_pos = labels[sampled_pos_inds_subset]
-    map_inds = 4 * labels_pos[:, None] + torch.tensor(
-        [0, 1, 2, 3], device=device)
+    # FIXME class_agnostic
+    N, num_classes = class_logits.shape
+    box_regression = box_regression.reshape(N, -1, 4)
 
     box_loss = smooth_l1_loss(
-        box_regression[sampled_pos_inds_subset[:, None], map_inds],
+        box_regression[sampled_pos_inds_subset, labels_pos],
         regression_targets[sampled_pos_inds_subset],
         size_average=False,
         beta=1,
@@ -539,7 +541,7 @@ class RoIHeads(torch.nn.Module):
             positive_fraction)
 
         self.box_coder = BoxCoder(bbox_reg_weights)
-        self.fields_to_keep = ["labels"]
+        self.target_fields_to_keep = ["labels"]
 
         self.box_roi_pool = box_roi_pool
         self.box_head = box_head
@@ -551,7 +553,7 @@ class RoIHeads(torch.nn.Module):
 
         # masks
         if mask_predictor is not None:
-            self.fields_to_keep.append("masks")
+            self.target_fields_to_keep.append("masks")
         self.mask_roi_pool = mask_roi_pool
         self.mask_head = mask_head
         self.mask_predictor = mask_predictor
@@ -562,7 +564,7 @@ class RoIHeads(torch.nn.Module):
             match_quality_matrix = self.box_similarity(targets_per_image, proposals_per_image)
             matched_idxs = self.proposal_matcher(match_quality_matrix)
             # Fast RCNN only need "labels" field for selecting the targets
-            targets_per_image = targets_per_image.copy_with_fields(self.fields_to_keep)
+            targets_per_image = targets_per_image.copy_with_fields(self.target_fields_to_keep)
             # get the targets corresponding GT for each proposal
             # NB: need to clamp the indices because we can have a single
             # GT in the image, and matched_idxs can be -2, which goes
@@ -600,8 +602,7 @@ class RoIHeads(torch.nn.Module):
             zip(sampled_pos_inds, sampled_neg_inds)
         ):
             img_sampled_inds = torch.nonzero(pos_inds_img | neg_inds_img).squeeze(1)
-            proposals_per_image = proposals[img_idx][img_sampled_inds]
-            proposals[img_idx] = proposals_per_image
+            proposals[img_idx] = proposals[img_idx][img_sampled_inds]
 
         return proposals
 
