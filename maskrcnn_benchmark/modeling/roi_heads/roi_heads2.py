@@ -327,6 +327,15 @@ def maskrcnn_inference(x, boxes):
     return results
 
 
+def new_prop(segmetation_masks, proposals, M):
+    masks = proposals.get_field('matched_masks2')
+    boxes = proposals.bbox
+    device = boxes.device
+    masks = torch.stack(list(masks), 0)
+    rois = torch.cat([torch.arange(boxes.shape[0], dtype=boxes.dtype, device=device)[:, None], boxes], dim=1)
+    from torchvision.ops import roi_pool, roi_align
+    return roi_align(masks[:, None].float(), rois, (M, M), 1)[:, 0]
+
 def project_masks_on_boxes(segmentation_masks, proposals, discretization_size):
     """
     Given segmentation masks and the bounding boxes corresponding
@@ -363,7 +372,17 @@ def project_masks_on_boxes(segmentation_masks, proposals, discretization_size):
     return torch.stack(masks, dim=0).to(device, dtype=torch.float32)
 
 
-def maskrcnn_loss(mask_logits, proposals, discretization_size):
+def new_prop0(gt_masks, proposals, M):
+    idxs = proposals.get_field('matched_idxs').float()
+    boxes = proposals.bbox
+    device = boxes.device
+    rois = torch.cat([idxs[:, None], boxes], dim=1)
+    from torchvision.ops import roi_pool, roi_align
+    return roi_align(gt_masks[:, None].float(), rois, (M, M), 1)[:, 0]
+
+
+import time
+def maskrcnn_loss(mask_logits, proposals, discretization_size, targets):
     """
     Arguments:
         proposals (list[BoxList])
@@ -375,8 +394,11 @@ def maskrcnn_loss(mask_logits, proposals, discretization_size):
     """
 
     labels = [p.get_field("labels") for p in proposals]
-    mask_targets = [project_masks_on_boxes(proposal.get_field("matched_masks"), proposal, discretization_size)
-            for proposal in proposals]
+    t = time.time()
+    # mask_targets = [project_masks_on_boxes(proposal.get_field("matched_masks"), proposal, discretization_size)
+    #         for proposal in proposals]
+    mask_targets = [new_prop0(t.get_field('masks2'), p, discretization_size) for t, p in zip(targets, proposals)]
+    print(time.time() - t)
 
     labels = cat(labels, dim=0)
     mask_targets = cat(mask_targets, dim=0)
@@ -553,7 +575,7 @@ class RoIHeads(torch.nn.Module):
 
         # masks
         if mask_predictor is not None:
-            self.target_fields_to_keep.append("masks")
+            #self.target_fields_to_keep.append("masks")
             self.has_mask = True
         self.mask_roi_pool = mask_roi_pool
         self.mask_head = mask_head
@@ -561,9 +583,12 @@ class RoIHeads(torch.nn.Module):
         self.mask_discretization_size = mask_discretization_size
 
     def assign_targets_to_proposals(self, proposals, targets):
+        all_matched_idxs = []
+        labels = []
         for proposals_per_image, targets_per_image in zip(proposals, targets):
             match_quality_matrix = self.box_similarity(targets_per_image, proposals_per_image)
             matched_idxs = self.proposal_matcher(match_quality_matrix)
+            # all_matched_idxs.append(matched_idxs.clamp(min=0))
             # Fast R-CNN only need "labels" field for selecting the targets
             # while Mask R-CNN also requires "masks"
             targets_per_image = targets_per_image.copy_with_fields(self.target_fields_to_keep)
@@ -572,15 +597,15 @@ class RoIHeads(torch.nn.Module):
             # GT in the image, and matched_idxs can be -2, which goes
             # out of bounds
             matched_targets = targets_per_image[matched_idxs.clamp(min=0)]
-            # proposals_per_image.add_field("matched_targets", matched_targets)
-            # proposals_per_image.add_field("matched_idxs", matched_idxs)
             proposals_per_image.add_field("matched_gt_boxes", matched_targets.bbox)
             for name in matched_targets.fields():
                 value = matched_targets.get_field(name)
                 proposals_per_image.add_field("matched_" + name, value)
 
-            labels_per_image = proposals_per_image.get_field("matched_labels")
-            labels_per_image = labels_per_image.clone().to(dtype=torch.int64)
+            gt_labels = targets_per_image.get_field("labels")
+            labels_per_image = gt_labels[matched_idxs.clamp(min=0)]
+            # labels_per_image = proposals_per_image.get_field("matched_labels")
+            labels_per_image = labels_per_image.to(dtype=torch.int64)
 
             # Label background (below the low threshold)
             bg_inds = matched_idxs == self.proposal_matcher.BELOW_LOW_THRESHOLD
@@ -590,7 +615,10 @@ class RoIHeads(torch.nn.Module):
             ignore_inds = matched_idxs == self.proposal_matcher.BETWEEN_THRESHOLDS
             labels_per_image[ignore_inds] = -1  # -1 is ignored by sampler
 
+            labels.append(labels_per_image)
+            proposals_per_image.add_field("matched_idxs", matched_idxs.clamp(min=0))
             proposals_per_image.add_field("labels", labels_per_image)
+        return all_matched_idxs
 
     def subsample_proposals(self, proposals):
         proposals = list(proposals)
@@ -665,7 +693,7 @@ class RoIHeads(torch.nn.Module):
 
             loss_mask = {}
             if self.training:
-                loss_mask = maskrcnn_loss(mask_logits, mask_proposals, self.mask_discretization_size)
+                loss_mask = maskrcnn_loss(mask_logits, mask_proposals, self.mask_discretization_size, targets)
                 loss_mask = dict(loss_mask=loss_mask)
             else:
                 result = maskrcnn_inference(mask_logits, mask_proposals)
