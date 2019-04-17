@@ -81,7 +81,6 @@ class COCODataset(torchvision.datasets.coco.CocoDetection):
 
         masks = target.get_field("masks")
         masks = torch.stack([mask.convert(mode="mask") for mask in masks], 0)
-        # masks = CudaList([mask.convert(mode="mask") for mask in masks])
         target.add_field("masks2", masks)
 
         return img, target, idx
@@ -126,24 +125,6 @@ class COCODataset(torchvision.datasets.coco.CocoDetection):
     def __len__(self):
         return 50
 
-class CudaList(list):
-    def __getitem__(self, item):
-        if isinstance(item, (int, slice)):
-            nl = super(CudaList, self).__getitem__(item)
-        else:
-            # advanced indexing on a single dimension
-            nl = []
-            if isinstance(item, torch.Tensor) and item.dtype == torch.uint8:
-                item = item.nonzero()
-                item = item.squeeze(1) if item.numel() > 0 else item
-                item = item.tolist()
-            for i in item:
-                nl.append(super(CudaList, self).__getitem__(i))
-        return CudaList(nl)
-
-    def to(self, *args, **kwargs):
-        nl = [t.to(*args, **kwargs) for t in self]
-        return type(self)(nl)
 
 from PIL import Image
 import os

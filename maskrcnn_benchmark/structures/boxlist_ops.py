@@ -48,6 +48,25 @@ def remove_small_boxes(boxlist, min_size):
     return boxlist[keep]
 
 
+def box_area(box):
+    return (box[:, 2] - box[:, 0]) * (box[:, 3] - box[:, 1])
+
+def box_iou(box1, box2):
+    N = len(box1)
+    M = len(box2)
+
+    area1 = box_area(box1)
+    area2 = box_area(box2)
+
+    lt = torch.max(box1[:, None, :2], box2[:, :2])  # [N,M,2]
+    rb = torch.min(box1[:, None, 2:], box2[:, 2:])  # [N,M,2]
+
+    wh = (rb - lt).clamp(min=0)  # [N,M,2]
+    inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
+
+    iou = inter / (area1[:, None] + area2 - inter)
+    return iou
+
 # implementation from https://github.com/kuangliu/torchcv/blob/master/torchcv/utils/box.py
 # with slight modifications
 def boxlist_iou(boxlist1, boxlist2):
