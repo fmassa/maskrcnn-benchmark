@@ -17,13 +17,15 @@ from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms
 from maskrcnn_benchmark.structures.boxlist_ops import remove_small_boxes
 
 
+from maskrcnn_benchmark.modeling.utils import cat
 from maskrcnn_benchmark.modeling.rpn.utils import concat_box_prediction_layers
 
 from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import BalancedPositiveNegativeSampler
 
 from maskrcnn_benchmark.layers import smooth_l1_loss
 from maskrcnn_benchmark.modeling.matcher import Matcher
-from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
+# from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
+from maskrcnn_benchmark.structures.boxlist_ops import box_iou  # move to BoxList
 
 
 def apply_deltas_to_boxlists(boxlists, pred_bbox_deltas, box_coder):
@@ -172,29 +174,30 @@ class AnchorGenerator(nn.Module):
         for i, (image_height, image_width) in enumerate(image_list.image_sizes):
             anchors_in_image = []
             for anchors_per_feature_map in anchors_over_all_feature_maps:
-                boxlist = BoxList(
-                    anchors_per_feature_map, (image_width, image_height), mode="xyxy"
-                )
-                anchors_in_image.append(boxlist)
+                anchors_in_image.append(anchors_per_feature_map)
+                # boxlist = BoxList(
+                #     anchors_per_feature_map, (image_width, image_height), mode="xyxy"
+                # )
+                # anchors_in_image.append(boxlist)
             anchors.append(anchors_in_image)
-        anchors = [cat_boxlist(anchors_per_image) for anchors_per_image in anchors]
+        # anchors = [cat_boxlist(anchors_per_image) for anchors_per_image in anchors]
+        anchors = [cat(anchors_per_image) for anchors_per_image in anchors]
         return anchors
 
 
 
-def boxlist_is_inside_image(boxlist, straddle_thresh=0):
-    image_width, image_height = boxlist.size
-    anchors = boxlist.bbox
+def box_is_inside_image(boxes, image_size, straddle_thresh=0):
+    image_width, image_height = image_size
     if straddle_thresh >= 0:
         inds_inside = (
-            (anchors[..., 0] >= -straddle_thresh)
-            & (anchors[..., 1] >= -straddle_thresh)
-            & (anchors[..., 2] < image_width + straddle_thresh)
-            & (anchors[..., 3] < image_height + straddle_thresh)
+            (boxes[..., 0] >= -straddle_thresh)
+            & (boxes[..., 1] >= -straddle_thresh)
+            & (boxes[..., 2] < image_width + straddle_thresh)
+            & (boxes[..., 3] < image_height + straddle_thresh)
         )
     else:
-        device = anchors.device
-        inds_inside = torch.ones(anchors.shape[0], dtype=torch.uint8, device=device)
+        device = boxes.device
+        inds_inside = torch.ones(boxes.shape[0], dtype=torch.uint8, device=device)
     return inds_inside
 
 
@@ -252,7 +255,8 @@ class RPN(torch.nn.Module):
         self.box_coder = BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
 
         # used during training
-        self.box_similarity = boxlist_iou
+        # self.box_similarity = boxlist_iou
+        self.box_similarity = box_iou
 
         self.proposal_matcher = Matcher(
             fg_iou_thresh,
@@ -273,9 +277,9 @@ class RPN(torch.nn.Module):
         labels = []
         matched_gt_boxes = []
         for anchors_per_image, targets_per_image in zip(anchors, targets):
-            match_quality_matrix = self.box_similarity(targets_per_image, anchors_per_image)
+            gt_boxes = targets_per_image["boxes"]
+            match_quality_matrix = self.box_similarity(gt_boxes, anchors_per_image)
             matched_idxs = self.proposal_matcher(match_quality_matrix)
-            gt_boxes = targets_per_image.bbox
             # get the targets corresponding GT for each proposal
             # NB: need to clamp the indices because we can have a single
             # GT in the image, and matched_idxs can be -2, which goes
@@ -290,8 +294,8 @@ class RPN(torch.nn.Module):
             labels_per_image[bg_indices] = 0
 
             # discard anchors that go out of the boundaries of the image
-            inds_inside = boxlist_is_inside_image(anchors_per_image)
-            labels_per_image[~inds_inside] = -1
+            # inds_inside = box_is_inside_image(anchors_per_image, image_size)
+            # labels_per_image[~inds_inside] = -1
 
             # discard indices that are between thresholds
             inds_to_discard = matched_idxs == self.proposal_matcher.BETWEEN_THRESHOLDS
@@ -315,8 +319,15 @@ class RPN(torch.nn.Module):
 
     def apply_deltas_to_anchors(self, anchors, pred_bbox_deltas):
         N = len(anchors)
-        proposals = apply_deltas_to_boxlists(anchors, pred_bbox_deltas, self.box_coder)
+        with torch.no_grad():
+            boxes_per_image = [len(a) for a in anchors]
+            concat_anchors = torch.cat(anchors, dim=0)
+
+            proposals = self.box_coder.decode(
+                pred_bbox_deltas.view(sum(boxes_per_image), -1), concat_anchors
+            )
         proposals = proposals.view(N, -1, 4)
+
         return proposals
 
     def select_top_n_pre_nms(self, proposals, objectness):
@@ -366,7 +377,7 @@ class RPN(torch.nn.Module):
     def map_targets_to_deltas(self, anchors, matched_gt_boxes):
         regression_targets = []
         for anchors_per_image, matched_gt_boxes_per_image in zip(anchors, matched_gt_boxes):
-            regression_targets_per_image = self.box_coder.encode(matched_gt_boxes_per_image, anchors_per_image.bbox)
+            regression_targets_per_image = self.box_coder.encode(matched_gt_boxes_per_image, anchors_per_image)
             regression_targets.append(regression_targets_per_image)
         return regression_targets
 
@@ -391,9 +402,10 @@ class RPN(torch.nn.Module):
         num_anchors = [o[0].numel() for o in objectness]
         objectness, pred_bbox_deltas = \
                 concat_box_prediction_layers(objectness, pred_bbox_deltas)
-        image_shapes = [box.size for box in anchors]
+        image_shapes = [i[::-1] for i in images.image_sizes]
         proposals = self.apply_deltas_to_anchors(anchors, pred_bbox_deltas)
         boxes = self.filter_proposals(proposals, objectness, image_shapes, num_anchors)
+        boxes = [b.bbox for b in boxes]
 
         losses = {}
         if self.training:

@@ -81,9 +81,14 @@ class COCODataset(torchvision.datasets.coco.CocoDetection):
 
         masks = target.get_field("masks")
         masks = torch.stack([mask.convert(mode="mask") for mask in masks], 0)
-        target.add_field("masks2", masks)
+        target.add_field("masks", masks)
 
-        return img, target, idx
+        t = {}
+        t["boxes"] = target.bbox
+        t["labels"] = target.get_field("labels")
+        t["masks"] = target.get_field("masks")
+
+        return img, t, idx
 
     def get_annotations(self, index):
         coco = self.coco

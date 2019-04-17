@@ -63,7 +63,8 @@ class GeneralizedRCNN(nn.Module):
         images = to_image_list(images)
         features = self.backbone(images.tensors)
         proposals, proposal_losses = self.rpn(images, features, targets)
-        result, detector_losses = self.roi_heads(features, proposals, targets)
+        image_shapes = [i[::-1] for i in images.image_sizes]
+        result, detector_losses = self.roi_heads(features, proposals, image_shapes, targets)
 
         losses = {}
         losses.update(detector_losses)

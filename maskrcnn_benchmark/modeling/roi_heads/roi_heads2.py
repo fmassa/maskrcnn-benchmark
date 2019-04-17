@@ -79,88 +79,62 @@ class FastRCNNPredictor(nn.Module):
         return scores, bbox_deltas
 
 
-def fastrcnn_inference(class_logits, box_regression, boxes,
-        score_thresh=0.05, nms_thresh=0.5, detections_per_img=100, box_coder=None):
-    """
-    From a set of classification scores, box regression and proposals,
-    computes the post-processed boxes, and applies NMS to obtain the
-    final results
+def clip_boxes_to_image(boxes, size):
+    boxes = boxes.clone()
+    boxes[..., 0].clamp_(min=0, max=size[0])
+    boxes[..., 1].clamp_(min=0, max=size[1])
+    boxes[..., 2].clamp_(min=0, max=size[0])
+    boxes[..., 3].clamp_(min=0, max=size[1])
+    return boxes
 
-    Arguments:
-        x (tuple[tensor, tensor]): x contains the class logits
-            and the box_regression from the model.
-        boxes (list[BoxList]): bounding boxes that are used as
-            reference, one for ech image
-        score_thresh (float)
-        nms (float)
-        detections_per_img (int)
-        box_coder (BoxCoder)
+from torchvision.ops import nms as box_nms
 
-    Returns:
-        results (list[BoxList]): one BoxList for each image, containing
-            the extra fields labels and scores
-    """
-    if box_coder is None:
-        box_coder = BoxCoder(weights=(10., 10., 5., 5.))
+def _fastrcnn_filter_proposals_in_image(boxes, prob, score_thresh, nms_thresh, detections_per_img):
+    device = boxes.device
+    boxes_in_image = []
+    scores_in_image = []
+    labels_in_image = []
+    boxes = boxes.unbind(1)
+    prob = prob.unbind(1)
+    for class_id, (boxes_for_class, prob_for_class) in enumerate(zip(boxes, prob), 1):
+        inds = torch.nonzero(prob_for_class > score_thresh).squeeze(1)
+        prob_for_class = prob_for_class[inds]
+        boxes_for_class = boxes_for_class[inds]
+        keep = box_nms(boxes_for_class, prob_for_class, nms_thresh)
+        boxes_for_class = boxes_for_class[keep]
+        prob_for_class = prob_for_class[keep]
+        num_boxes = len(boxes_for_class)
+        label = torch.full((num_boxes,), class_id, dtype=torch.int64, device=device)
+        boxes_in_image.append(boxes_for_class)
+        scores_in_image.append(prob_for_class)
+        labels_in_image.append(label)
+    boxes_in_image = torch.cat(boxes_in_image, dim=0)
+    scores_in_image = torch.cat(scores_in_image, dim=0)
+    labels_in_image = torch.cat(labels_in_image, dim=0)
 
-    class_prob = F.softmax(class_logits, -1)
-
-    # TODO think about a representation of batch of boxes
-    image_shapes = [box.size for box in boxes]
-    boxes_per_image = [len(box) for box in boxes]
-
-    num_classes = class_prob.shape[1]
-    cls_agnostic_bbox_reg = box_regression.shape[1] // 4 != num_classes
-
-    if cls_agnostic_bbox_reg:
-        box_regression = box_regression[:, -4:]
-
-    proposals = apply_deltas_to_boxlists(boxes, box_regression, box_coder)
-
-    if cls_agnostic_bbox_reg:
-        proposals = proposals.repeat(1, num_classes)
-
-    """Returns bounding-box detection results by thresholding on scores and
-    applying non-maximum suppression (NMS).
-    """
-    def threshold_and_nms(boxlist, scores, j):
-        device = scores.device
-        inds = (scores > score_thresh).nonzero().squeeze(1)
-        boxlist = boxlist[inds]
-        scores = scores[inds]
-        boxlist = boxlist.clip_to_image(remove_empty=False)
-        boxlist.add_field("scores", scores)
-        boxlist = boxlist_nms(
-            boxlist, nms_thresh
+    number_of_detections = len(boxes_in_image)
+    # Limit to max_per_image detections **over all classes**
+    if number_of_detections > detections_per_img > 0:
+        image_thresh, _ = torch.kthvalue(
+            scores_in_image.cpu(), number_of_detections - detections_per_img + 1
         )
-        num_labels = len(boxlist)
-        boxlist.add_field(
-            "labels", torch.full((num_labels,), j + 1, dtype=torch.int64, device=device)
-        )
-        return boxlist
+        keep = scores_in_image >= image_thresh.item()
+        keep = torch.nonzero(keep).squeeze(1)
+        boxes_in_image = boxes_in_image[keep]
+        scores_in_image = scores_in_image[keep]
+        labels_in_image = labels_in_image[keep]
+    result = {}
+    result["boxes"] = boxes_in_image
+    result["scores"] = scores_in_image
+    result["labels"] = labels_in_image
+    return result
 
-    def limit_max_detections(boxlist):
-        number_of_detections = len(boxlist)
-        # Limit to max_per_image detections **over all classes**
-        if number_of_detections > detections_per_img > 0:
-            cls_scores = boxlist.get_field("scores")
-            image_thresh, _ = torch.kthvalue(
-                cls_scores.cpu(), number_of_detections - detections_per_img + 1
-            )
-            keep = cls_scores >= image_thresh.item()
-            keep = torch.nonzero(keep).squeeze(1)
-            boxlist = boxlist[keep]
-        return boxlist
-
-    proposals = proposals.reshape(sum(boxes_per_image), -1, 4)
-    # remove predictions with the background label
-    proposals = proposals[:, 1:]
-    class_prob = class_prob[:, 1:]
-    results = generic_filter_proposals(proposals, class_prob, image_shapes,
-            boxes_per_image, 1, filter_fn=threshold_and_nms, post_filter_fn=limit_max_detections)
-
-    return results
-
+def fastrcnn_filter_proposals(regressed_proposals, class_prob, image_shapes, score_thresh, nms_thresh, detections_per_img):
+    predictions = []
+    for boxes, prob, image_shape in zip(regressed_proposals, class_prob, image_shapes):
+        boxes = clip_boxes_to_image(boxes, image_shape)
+        predictions.append(_fastrcnn_filter_proposals_in_image(boxes, prob, score_thresh, nms_thresh, detections_per_img))
+    return predictions
 
 def fastrcnn_loss(class_logits, box_regression, labels, regression_targets):
     # proposals, gt_boxes, labels, matched_idxs, box_coder):
@@ -277,23 +251,19 @@ def maskrcnn_inference(x, boxes):
 
     # select masks coresponding to the predicted classes
     num_masks = x.shape[0]
-    labels = [bbox.get_field("labels") for bbox in boxes]
+    # labels = [bbox.get_field("labels") for bbox in boxes]
+    labels = [r["labels"] for r in boxes]
+    boxes_per_image = [len(l) for l in labels]
     labels = torch.cat(labels)
     index = torch.arange(num_masks, device=labels.device)
     mask_prob = mask_prob[index, labels][:, None]
 
-    boxes_per_image = [len(box) for box in boxes]
     mask_prob = mask_prob.split(boxes_per_image, dim=0)
 
-    results = []
     for prob, box in zip(mask_prob, boxes):
-        bbox = BoxList(box.bbox, box.size, mode="xyxy")
-        for field in box.fields():
-            bbox.add_field(field, box.get_field(field))
-        bbox.add_field("mask", prob)
-        results.append(bbox)
+        box["mask"] = prob
 
-    return results
+    return boxes
 
 
 def new_prop(segmetation_masks, proposals, M):
@@ -593,21 +563,17 @@ class RoIHeads(torch.nn.Module):
 
         return proposals
 
-    def forward(self, features, proposals, targets=None):
-        # remove all fields that might have been attached to the proposals
-        # they are not used by RoIHeads
-        proposals = [p.copy_with_fields([]) for p in proposals]
-        proposals_boxlist = proposals
-        proposals = [p.bbox for p in proposals]
+    def forward(self, features, proposals, image_shapes, targets=None):
         if self.training:
             assert targets is not None
-            assert all(t.has_field("labels") for t in targets)
+            assert all("boxes" in t for t in targets)
+            assert all("labels" in t for t in targets)
             if self.has_mask:
-                assert all(t.has_field("masks") for t in targets)
+                assert all("masks" in t for t in targets)
 
-            gt_boxes = [t.bbox for t in targets]
-            gt_labels = [t.get_field("labels") for t in targets]
-            gt_masks = [t.get_field("masks2") for t in targets]
+            gt_boxes = [t["boxes"] for t in targets]
+            gt_labels = [t["labels"] for t in targets]
+            gt_masks = [t["masks"] for t in targets]
 
             # append ground-truth bboxes to propos
             proposals = self.add_gt_proposals(proposals, gt_boxes)
@@ -616,7 +582,7 @@ class RoIHeads(torch.nn.Module):
             matched_idxs, labels = self.assign_targets_to_proposals(proposals, gt_boxes, gt_labels)
             # sample a fixed proportion of positive-negative proposals
             sampled_inds = self.subsample(labels)
-            num_images = len(targets)
+            num_images = len(proposals)
             for img_id in range(num_images):
                 img_sampled_inds = sampled_inds[img_id]
                 proposals[img_id] = proposals[img_id][img_sampled_inds]
@@ -640,23 +606,35 @@ class RoIHeads(torch.nn.Module):
                 class_logits, box_regression, labels, regression_targets)
             losses = dict(loss_classifier=loss_classifier, loss_box_reg=loss_box_reg)
         else:
-            result = fastrcnn_inference(class_logits, box_regression, proposals_boxlist,
-                    self.score_thresh, self.nms_thresh, self.detections_per_img, self.box_coder)
-            for r in result:
-                o = {}
-                o["boxes"] = r.bbox
-                o["scores"] = r.get_field("scores")
-                o["labels"] = r.get_field("labels")
-                o["image_size"] = torch.as_tensor(r.size)
-                output.append(o)
+            boxes_per_image = [len(boxes_in_image) for boxes_in_image in proposals]
+
+            concat_proposals = torch.cat(proposals, dim=0)
+            regressed_proposals = self.box_coder.decode(
+                box_regression.view(sum(boxes_per_image), -1), concat_proposals
+            )
+
+            regressed_proposals = regressed_proposals.reshape(sum(boxes_per_image), -1, 4)
+
+            class_prob = F.softmax(class_logits, -1)
+
+            # remove predictions with the background label
+            class_prob = class_prob[:, 1:]
+            regressed_proposals = regressed_proposals[:, 1:]
+
+            regressed_proposals = regressed_proposals.split(boxes_per_image, 0)
+            class_prob = class_prob.split(boxes_per_image, 0)
+
+            result = fastrcnn_filter_proposals(regressed_proposals, class_prob, image_shapes,
+                    self.score_thresh, self.nms_thresh, self.detections_per_img)
+
+            for r, image_shape in zip(result, image_shapes):
+                r["image_size"] = torch.as_tensor(image_shape)
 
         if self.has_mask:
-            mask_proposals = result
-            mask_proposals_boxlist = mask_proposals
-            mask_proposals = [p.bbox for p in mask_proposals]
+            mask_proposals = [p["boxes"] for p in result]
             if self.training:
                 # during training, only focus on positive boxes
-                num_images = len(targets)
+                num_images = len(proposals)
                 mask_proposals = []
                 mask_matched_idxs = []
                 for img_id in range(num_images):
@@ -670,13 +648,12 @@ class RoIHeads(torch.nn.Module):
 
             loss_mask = {}
             if self.training:
-                loss_mask = maskrcnn_loss(mask_logits, mask_proposals, gt_masks, gt_labels, mask_matched_idxs, self.mask_discretization_size)
+                loss_mask = maskrcnn_loss(mask_logits, mask_proposals,
+                        gt_masks, gt_labels, mask_matched_idxs, self.mask_discretization_size)
                 loss_mask = dict(loss_mask=loss_mask)
             else:
-                result = maskrcnn_inference(mask_logits, mask_proposals_boxlist)
-                for o, r in zip(output, result):
-                    o["mask"] = r.get_field("mask")
+                result = maskrcnn_inference(mask_logits, result)
 
             losses.update(loss_mask)
 
-        return output, losses
+        return result, losses
