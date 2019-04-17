@@ -172,8 +172,8 @@ def prepare_for_coco_detection(predictions, dataset):
         # prediction = prediction.convert("xywh")
 
         boxes = prediction["boxes"]
-        original_size = prediction["image_size"]
-        boxes = resize_boxes(boxes, original_size, (image_width, image_height))
+        c_height, c_width = prediction["image_size"]
+        boxes = resize_boxes(boxes, (c_width, c_height), (image_width, image_height))
         boxes = convert_to_xywh(boxes).tolist()
         scores = prediction["scores"].tolist()
         labels = prediction["labels"].tolist()
@@ -215,13 +215,13 @@ def prepare_for_coco_segmentation(predictions, dataset):
         image_height = img_info["height"]
         #prediction = prediction.resize((image_width, image_height))
         #masks = prediction.get_field("mask")
-        original_size = prediction["image_size"]
+        c_height, c_width = prediction["image_size"]
         boxes = prediction["boxes"]
-        boxes = resize_boxes(boxes, original_size, (image_width, image_height))
+        boxes = resize_boxes(boxes, (c_width, c_height), (image_width, image_height))
         masks = prediction["mask"]
         scores = prediction["scores"]
         labels = prediction["labels"]
-        prediction = dict(boxes=boxes, mask=masks, image_size=torch.as_tensor((image_width, image_height)), scores=scores, labels=labels)
+        prediction = dict(boxes=boxes, mask=masks, image_size=torch.as_tensor((image_height, image_width)), scores=scores, labels=labels)
         # t = time.time()
         # Masker is necessary only if masks haven't been already resized.
         if list(masks.shape[-2:]) != [image_height, image_width]:

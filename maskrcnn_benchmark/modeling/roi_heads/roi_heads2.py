@@ -23,8 +23,6 @@ from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
 )
 from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import box_iou  # move to BoxList
-from maskrcnn_benchmark.modeling.rpn.rpn import generic_filter_proposals  # TODO remove from there
-from maskrcnn_benchmark.modeling.rpn.rpn import apply_deltas_to_boxlists  # TODO remove from there
 
 # Mask
 from maskrcnn_benchmark.modeling.make_layers import make_conv3x3
@@ -425,7 +423,7 @@ class Masker(object):
     def forward_single_image(self, masks, prediction):
         # boxes = boxes.convert("xyxy")
         # im_w, im_h = boxes.size
-        im_w, im_h = prediction["image_size"].tolist()
+        im_h, im_w = prediction["image_size"].tolist()
         res = [
             paste_mask_in_image(mask[0], box, im_h, im_w, self.threshold, self.padding)
             for mask, box in zip(masks, prediction["boxes"])

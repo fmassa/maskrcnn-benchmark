@@ -30,46 +30,6 @@ from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import box_iou  # move to BoxList
 
 
-def apply_deltas_to_boxlists(boxlists, pred_bbox_deltas, box_coder):
-    """
-    Arguments:
-        boxlists (List[BoxList])
-        pred_bbox_deltas (Tensor)
-    """
-    with torch.no_grad():
-        boxes_per_image = [len(boxlist) for boxlist in boxlists]
-        concat_anchors = torch.cat([a.bbox for a in boxlists], dim=0)
-
-        proposals = box_coder.decode(
-            pred_bbox_deltas.view(sum(boxes_per_image), -1), concat_anchors
-        )
-        return proposals
-
-
-def generic_filter_proposals(all_proposals, all_scores, image_shapes,
-                     split_dim0, split_dim1, pre_filter_fn=None, filter_fn=None, post_filter_fn=None):
-    # all_proposals: [K, C, 4]
-    # all_scores: [K, C]
-    final_result = []
-    for j, (proposals, scores) in enumerate(zip(all_proposals.split(split_dim1, 1), all_scores.split(split_dim1, 1))):
-        if pre_filter_fn is not None:
-            proposals, scores = pre_filter_fn(proposals, scores)
-        result = []
-        for p, s, im_shape in zip(proposals.split(split_dim0, 0), scores.split(split_dim0, 0), image_shapes):
-            boxlist = BoxList(p.reshape(-1, 4), im_shape, mode="xyxy")
-            if filter_fn is not None:
-                boxlist = filter_fn(boxlist, s.flatten(), j)
-            result.append(boxlist)
-        final_result.append(result)
-
-    boxlists = list(zip(*final_result))
-    boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
-    if post_filter_fn is not None:
-        for i, boxlist in enumerate(boxlists):
-            boxlists[i] = post_filter_fn(boxlist)
-    return boxlists
-
-
 class BufferList(nn.Module):
     """
     Similar to nn.ParameterList, but for buffers
@@ -367,7 +327,7 @@ class RPN(torch.nn.Module):
 
     def filter_proposals(self, proposals, objectness, image_shapes, num_anchors):
         with torch.no_grad():
-            return _filter_proposals(self, proposals, objectness, image_shapes, num_anchors)
+            return self._filter_proposals(proposals, objectness, image_shapes, num_anchors)
 
     def _filter_proposals(self, proposals, objectness, image_shapes, num_anchors):
         N = proposals.shape[0]
@@ -431,9 +391,8 @@ class RPN(torch.nn.Module):
         num_anchors = [o[0].numel() for o in objectness]
         objectness, pred_bbox_deltas = \
                 concat_box_prediction_layers(objectness, pred_bbox_deltas)
-        image_shapes = [i[::-1] for i in images.image_sizes]
         proposals = self.apply_deltas_to_anchors(anchors, pred_bbox_deltas)
-        boxes, scores = self.filter_proposals(proposals, objectness, image_shapes, num_anchors)
+        boxes, scores = self.filter_proposals(proposals, objectness, images.image_sizes, num_anchors)
 
         losses = {}
         if self.training:

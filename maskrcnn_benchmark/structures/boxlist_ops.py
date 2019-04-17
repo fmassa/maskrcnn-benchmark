@@ -31,22 +31,6 @@ def boxlist_nms(boxlist, nms_thresh, max_proposals=-1, score_field="scores"):
     return boxlist.convert(mode)
 
 
-def remove_small_boxes0(boxlist, min_size):
-    """
-    Only keep boxes with both sides >= min_size
-
-    Arguments:
-        boxlist (Boxlist)
-        min_size (int)
-    """
-    # TODO maybe add an API for querying the ws / hs
-    xywh_boxes = boxlist.convert("xywh").bbox
-    _, _, ws, hs = xywh_boxes.unbind(dim=1)
-    keep = (
-        (ws >= min_size) & (hs >= min_size)
-    ).nonzero().squeeze(1)
-    return boxlist[keep]
-
 def remove_small_boxes(boxes, min_size):
     ws, hs = boxes[:, 2] - boxes[:, 0], boxes[:, 3] - boxes[:, 1]
     keep = (
@@ -56,10 +40,10 @@ def remove_small_boxes(boxes, min_size):
 
 def clip_boxes_to_image(boxes, size):
     boxes = boxes.clone()
-    boxes[..., 0].clamp_(min=0, max=size[0])
-    boxes[..., 1].clamp_(min=0, max=size[1])
-    boxes[..., 2].clamp_(min=0, max=size[0])
-    boxes[..., 3].clamp_(min=0, max=size[1])
+    boxes[..., 0].clamp_(min=0, max=size[1])
+    boxes[..., 1].clamp_(min=0, max=size[0])
+    boxes[..., 2].clamp_(min=0, max=size[1])
+    boxes[..., 3].clamp_(min=0, max=size[0])
     return boxes
 
 def box_area(box):
