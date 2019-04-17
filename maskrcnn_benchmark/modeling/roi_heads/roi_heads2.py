@@ -7,6 +7,7 @@ from torch import nn
 from maskrcnn_benchmark.structures.bounding_box import BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms  # move to BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import cat_boxlist  # move to BoxList
+from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 
 # loss
@@ -78,14 +79,6 @@ class FastRCNNPredictor(nn.Module):
 
         return scores, bbox_deltas
 
-
-def clip_boxes_to_image(boxes, size):
-    boxes = boxes.clone()
-    boxes[..., 0].clamp_(min=0, max=size[0])
-    boxes[..., 1].clamp_(min=0, max=size[1])
-    boxes[..., 2].clamp_(min=0, max=size[0])
-    boxes[..., 3].clamp_(min=0, max=size[1])
-    return boxes
 
 from torchvision.ops import nms as box_nms
 

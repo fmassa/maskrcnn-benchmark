@@ -13,8 +13,10 @@ from maskrcnn_benchmark.structures.bounding_box import BoxList
 
 
 from maskrcnn_benchmark.structures.boxlist_ops import cat_boxlist
-from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms
+# from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms
+from torchvision.ops import nms as box_nms
 from maskrcnn_benchmark.structures.boxlist_ops import remove_small_boxes
+from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
 
 
 from maskrcnn_benchmark.modeling.utils import cat
@@ -341,38 +343,65 @@ class RPN(torch.nn.Module):
         proposals = proposals[batch_idx, topk_idx]
         return proposals, objectness
 
+    def limit_max_proposals(self, boxes, objectness):
+        num_boxes = len(boxes)
+        post_nms_top_n = min(self.post_nms_top_n, num_boxes)
+        if num_boxes <= post_nms_top_n:
+            return boxes, objectness
+        objectness, inds_sorted = torch.topk(
+            objectness, post_nms_top_n, dim=0, sorted=True
+        )
+        return boxes[inds_sorted], objectness
+
+
+    def clip_and_nms(self, boxes, objectness, image_size):
+        boxlist = clip_boxes_to_image(boxes, image_size)
+        keep = remove_small_boxes(boxes, self.min_size)
+        boxes = boxes[keep]
+        objectness = objectness[keep]
+
+        keep = box_nms(boxes, objectness, self.post_nms_top_n)
+        boxes = boxes[keep]
+        objectness = objectness[keep]
+        return boxes, objectness
+
     def filter_proposals(self, proposals, objectness, image_shapes, num_anchors):
-        def clip_and_nms(boxlist, scores, j):
-            boxlist.add_field("objectness", scores)
-            boxlist = boxlist.clip_to_image(remove_empty=False)
-            boxlist = remove_small_boxes(boxlist, self.min_size)
-            boxlist = boxlist_nms(
-                boxlist,
-                self.nms_thresh,
-                max_proposals=self.post_nms_top_n,
-                score_field="objectness",
-            )
-            return boxlist
-
-        def limit_max_proposals(boxlist):
-            num_boxes = len(boxlist)
-            post_nms_top_n = min(self.post_nms_top_n, num_boxes)
-            if num_boxes <= post_nms_top_n:
-                return boxlist
-            objectness = boxlist.get_field("objectness")
-            _, inds_sorted = torch.topk(
-                objectness, post_nms_top_n, dim=0, sorted=True
-            )
-            return boxlist[inds_sorted]
-
         with torch.no_grad():
-            N = proposals.shape[0]
-            objectness = objectness.reshape(N, -1)
+            return _filter_proposals(self, proposals, objectness, image_shapes, num_anchors)
 
-            boxlists = generic_filter_proposals(proposals, objectness, image_shapes, 1, num_anchors,
-                    self.select_top_n_pre_nms, clip_and_nms, limit_max_proposals)
+    def _filter_proposals(self, proposals, objectness, image_shapes, num_anchors):
+        N = proposals.shape[0]
+        objectness = objectness.reshape(N, -1)
 
-        return boxlists
+        all_proposals = proposals.split(num_anchors, 1)
+        all_scores = objectness.split(num_anchors, 1)
+
+        final_result = []
+        final_boxes = []
+        final_scores = []
+        for proposals, scores in zip(all_proposals, all_scores):
+            proposals, scores = self.select_top_n_pre_nms(proposals, scores)
+            result = []
+            l_boxes = []
+            l_scores = []
+            for p, s, im_shape in zip(proposals, scores, image_shapes):
+                boxlist = BoxList(p.reshape(-1, 4), im_shape, mode="xyxy")
+                p, s = self.clip_and_nms(p.reshape(-1, 4), s, im_shape)
+                l_boxes.append(p)
+                l_scores.append(s)
+            final_boxes.append(l_boxes)
+            final_scores.append(l_scores)
+
+        final_boxes = list(zip(*final_boxes))
+        final_scores = list(zip(*final_scores))
+        final_boxes = [cat(x) for x in final_boxes]
+        final_scores = [cat(x) for x in final_scores]
+        for i in range(len(final_boxes)):
+            boxes, scores = self.limit_max_proposals(final_boxes[i], final_scores[i])
+            final_boxes[i] = boxes
+            final_scores[i] = scores
+
+        return final_boxes, final_scores
 
     def map_targets_to_deltas(self, anchors, matched_gt_boxes):
         regression_targets = []
@@ -404,8 +433,7 @@ class RPN(torch.nn.Module):
                 concat_box_prediction_layers(objectness, pred_bbox_deltas)
         image_shapes = [i[::-1] for i in images.image_sizes]
         proposals = self.apply_deltas_to_anchors(anchors, pred_bbox_deltas)
-        boxes = self.filter_proposals(proposals, objectness, image_shapes, num_anchors)
-        boxes = [b.bbox for b in boxes]
+        boxes, scores = self.filter_proposals(proposals, objectness, image_shapes, num_anchors)
 
         losses = {}
         if self.training:

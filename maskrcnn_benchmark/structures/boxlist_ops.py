@@ -31,7 +31,7 @@ def boxlist_nms(boxlist, nms_thresh, max_proposals=-1, score_field="scores"):
     return boxlist.convert(mode)
 
 
-def remove_small_boxes(boxlist, min_size):
+def remove_small_boxes0(boxlist, min_size):
     """
     Only keep boxes with both sides >= min_size
 
@@ -47,6 +47,20 @@ def remove_small_boxes(boxlist, min_size):
     ).nonzero().squeeze(1)
     return boxlist[keep]
 
+def remove_small_boxes(boxes, min_size):
+    ws, hs = boxes[:, 2] - boxes[:, 0], boxes[:, 3] - boxes[:, 1]
+    keep = (
+        (ws >= min_size) & (hs >= min_size)
+    ).nonzero().squeeze(1)
+    return keep
+
+def clip_boxes_to_image(boxes, size):
+    boxes = boxes.clone()
+    boxes[..., 0].clamp_(min=0, max=size[0])
+    boxes[..., 1].clamp_(min=0, max=size[1])
+    boxes[..., 2].clamp_(min=0, max=size[0])
+    boxes[..., 3].clamp_(min=0, max=size[1])
+    return boxes
 
 def box_area(box):
     return (box[:, 2] - box[:, 0]) * (box[:, 3] - box[:, 1])
