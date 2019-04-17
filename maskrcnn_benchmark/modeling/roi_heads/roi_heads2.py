@@ -349,7 +349,6 @@ def new_prop0(gt_masks, boxes, matched_idxs, M):
     return roi_align(gt_masks[:, None].float(), rois, (M, M), 1)[:, 0]
 
 
-import time
 def maskrcnn_loss(mask_logits, proposals, gt_masks, gt_labels, mask_matched_idxs, discretization_size):
     """
     Arguments:
@@ -362,9 +361,7 @@ def maskrcnn_loss(mask_logits, proposals, gt_masks, gt_labels, mask_matched_idxs
     """
 
     labels = [l[idxs] for l, idxs in zip(gt_labels, mask_matched_idxs)]
-    # t = time.time()
     mask_targets = [new_prop0(m, p, i, discretization_size) for m, p, i in zip(gt_masks, proposals, mask_matched_idxs)]
-    # print(time.time() - t)
 
     labels = cat(labels, dim=0)
     mask_targets = cat(mask_targets, dim=0)
@@ -462,12 +459,13 @@ class Masker(object):
         self.threshold = threshold
         self.padding = padding
 
-    def forward_single_image(self, masks, boxes):
-        boxes = boxes.convert("xyxy")
-        im_w, im_h = boxes.size
+    def forward_single_image(self, masks, prediction):
+        # boxes = boxes.convert("xyxy")
+        # im_w, im_h = boxes.size
+        im_w, im_h = prediction["image_size"].tolist()
         res = [
             paste_mask_in_image(mask[0], box, im_h, im_w, self.threshold, self.padding)
-            for mask, box in zip(masks, boxes.bbox)
+            for mask, box in zip(masks, prediction["boxes"])
         ]
         if len(res) > 0:
             res = torch.stack(res, dim=0)[:, None]
@@ -475,19 +473,21 @@ class Masker(object):
             res = masks.new_empty((0, 1, masks.shape[-2], masks.shape[-1]))
         return res
 
-    def __call__(self, masks, boxes):
-        if isinstance(boxes, BoxList):
-            boxes = [boxes]
+    def __call__(self, masks, prediction):
+        # if isinstance(boxes, BoxList):
+        #     boxes = [boxes]
+        if isinstance(prediction, dict):
+            prediction = [prediction]
 
         # Make some sanity check
-        assert len(boxes) == len(masks), "Masks and boxes should have the same length."
+        assert len(prediction) == len(masks), "Masks and boxes should have the same length."
 
         # TODO:  Is this JIT compatible?
         # If not we should make it compatible.
         results = []
-        for mask, box in zip(masks, boxes):
-            assert mask.shape[0] == len(box), "Number of objects should be the same."
-            result = self.forward_single_image(mask, box)
+        for mask, p in zip(masks, prediction):
+            assert mask.shape[0] == len(p["boxes"]), "Number of objects should be the same."
+            result = self.forward_single_image(mask, p)
             results.append(result)
         return results
 
@@ -628,6 +628,7 @@ class RoIHeads(torch.nn.Module):
         class_logits, box_regression = self.box_predictor(box_features)
 
         result, losses = [], {}
+        output = []
         if self.training:
             regression_targets = []
             for proposals_per_image, gt_boxes_in_image, matched_idxs_in_image in zip(
@@ -641,6 +642,13 @@ class RoIHeads(torch.nn.Module):
         else:
             result = fastrcnn_inference(class_logits, box_regression, proposals_boxlist,
                     self.score_thresh, self.nms_thresh, self.detections_per_img, self.box_coder)
+            for r in result:
+                o = {}
+                o["boxes"] = r.bbox
+                o["scores"] = r.get_field("scores")
+                o["labels"] = r.get_field("labels")
+                o["image_size"] = torch.as_tensor(r.size)
+                output.append(o)
 
         if self.has_mask:
             mask_proposals = result
@@ -666,7 +674,9 @@ class RoIHeads(torch.nn.Module):
                 loss_mask = dict(loss_mask=loss_mask)
             else:
                 result = maskrcnn_inference(mask_logits, mask_proposals_boxlist)
+                for o, r in zip(output, result):
+                    o["mask"] = r.get_field("mask")
 
             losses.update(loss_mask)
 
-        return result, losses
+        return output, losses

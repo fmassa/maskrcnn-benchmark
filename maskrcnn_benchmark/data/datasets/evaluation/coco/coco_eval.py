@@ -10,6 +10,81 @@ from maskrcnn_benchmark.structures.bounding_box import BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 
 
+
+def do_coco_evaluation_(
+    dataset,
+    predictions,
+    box_only,
+    output_folder,
+    iou_types,
+    expected_results,
+    expected_results_sigma_tol,
+):
+    from maskrcnn_benchmark.data.datasets.coco import convert_to_coco_api
+    logger = logging.getLogger("maskrcnn_benchmark.inference")
+
+    logger.info("Preparing results for COCO format")
+    coco_results = {}
+    if "bbox" in iou_types:
+        logger.info("Preparing bbox results")
+        coco_results["bbox"] = prepare_for_coco_detection0(predictions, dataset)
+    if "segm" in iou_types:
+        logger.info("Preparing segm results")
+        coco_results["segm"] = prepare_for_coco_segmentation(predictions, dataset)
+
+    results = COCOResults(*iou_types)
+    logger.info("Evaluating predictions")
+    coco_ds = convert_to_coco_api(dataset)
+    for iou_type in iou_types:
+        with tempfile.NamedTemporaryFile() as f:
+            file_path = f.name
+            if output_folder:
+                file_path = os.path.join(output_folder, iou_type + ".json")
+            res = evaluate_predictions_on_coco(
+                coco_ds, coco_results[iou_type], file_path, iou_type
+            )
+            results.update(res)
+    logger.info(results)
+
+    do_coco_evaluation0(dataset, predictions, box_only, output_folder, iou_types, expected_results, expected_results_sigma_tol)
+    return results, coco_results
+
+
+def prepare_for_coco_detection0(predictions, dataset):
+    # assert isinstance(dataset, COCODataset)
+    coco_results = []
+    for image_id, prediction in enumerate(predictions):
+        if len(prediction) == 0:
+            continue
+
+        #img_info = dataset.get_img_info(image_id)
+        target = dataset.get_annotations(image_id)
+        #image_width = img_info["width"]
+        #image_height = img_info["height"]
+        #prediction = prediction.resize((image_width, image_height))
+        predicton = prediction.resize(target.size)
+        prediction = prediction.convert("xywh")
+
+        boxes = prediction.bbox.tolist()
+        scores = prediction.get_field("scores").tolist()
+        labels = prediction.get_field("labels").tolist()
+
+        # mapped_labels = [dataset.contiguous_category_id_to_json_id[i] for i in labels]
+
+        coco_results.extend(
+            [
+                {
+                    "image_id": image_id,
+                    "category_id": labels[k],
+                    "bbox": box,
+                    "score": scores[k],
+                }
+                for k, box in enumerate(boxes)
+            ]
+        )
+    return coco_results
+
+
 def do_coco_evaluation(
     dataset,
     predictions,
@@ -67,6 +142,20 @@ def do_coco_evaluation(
     return results, coco_results
 
 
+def resize_boxes(boxes, original_size, new_size):
+    ratios = tuple(float(s) / float(s_orig) for s, s_orig in zip(new_size, original_size))
+    ratio_width, ratio_height = ratios
+    xmin, ymin, xmax, ymax = boxes.unbind(1)
+    xmin = xmin * ratio_width
+    xmax = xmax * ratio_width
+    ymin = ymin * ratio_height
+    ymax = ymax * ratio_height
+    return torch.stack((xmin, ymin, xmax, ymax), dim=1)
+
+def convert_to_xywh(boxes):
+    xmin, ymin, xmax, ymax = boxes.unbind(1)
+    return torch.stack((xmin, ymin, xmax - xmin, ymax - ymin), dim=1)
+
 def prepare_for_coco_detection(predictions, dataset):
     # assert isinstance(dataset, COCODataset)
     coco_results = []
@@ -78,12 +167,20 @@ def prepare_for_coco_detection(predictions, dataset):
         img_info = dataset.get_img_info(image_id)
         image_width = img_info["width"]
         image_height = img_info["height"]
-        prediction = prediction.resize((image_width, image_height))
-        prediction = prediction.convert("xywh")
 
-        boxes = prediction.bbox.tolist()
-        scores = prediction.get_field("scores").tolist()
-        labels = prediction.get_field("labels").tolist()
+        # prediction = prediction.resize((image_width, image_height))
+        # prediction = prediction.convert("xywh")
+
+        boxes = prediction["boxes"]
+        original_size = prediction["image_size"]
+        boxes = resize_boxes(boxes, original_size, (image_width, image_height))
+        boxes = convert_to_xywh(boxes).tolist()
+        scores = prediction["scores"].tolist()
+        labels = prediction["labels"].tolist()
+
+        # boxes = prediction.bbox.tolist()
+        # scores = prediction.get_field("scores").tolist()
+        # labels = prediction.get_field("labels").tolist()
 
         mapped_labels = [dataset.contiguous_category_id_to_json_id[i] for i in labels]
 
@@ -116,8 +213,15 @@ def prepare_for_coco_segmentation(predictions, dataset):
         img_info = dataset.get_img_info(image_id)
         image_width = img_info["width"]
         image_height = img_info["height"]
-        prediction = prediction.resize((image_width, image_height))
-        masks = prediction.get_field("mask")
+        #prediction = prediction.resize((image_width, image_height))
+        #masks = prediction.get_field("mask")
+        original_size = prediction["image_size"]
+        boxes = prediction["boxes"]
+        boxes = resize_boxes(boxes, original_size, (image_width, image_height))
+        masks = prediction["mask"]
+        scores = prediction["scores"]
+        labels = prediction["labels"]
+        prediction = dict(boxes=boxes, mask=masks, image_size=torch.as_tensor((image_width, image_height)), scores=scores, labels=labels)
         # t = time.time()
         # Masker is necessary only if masks haven't been already resized.
         if list(masks.shape[-2:]) != [image_height, image_width]:
@@ -127,8 +231,10 @@ def prepare_for_coco_segmentation(predictions, dataset):
         # prediction = prediction.convert('xywh')
 
         # boxes = prediction.bbox.tolist()
-        scores = prediction.get_field("scores").tolist()
-        labels = prediction.get_field("labels").tolist()
+        # scores = prediction.get_field("scores").tolist()
+        # labels = prediction.get_field("labels").tolist()
+        scores = prediction["scores"].tolist()
+        labels = prediction["labels"].tolist()
 
         # rles = prediction.get_field('mask')
 
@@ -317,6 +423,7 @@ def evaluate_predictions_on_coco(
 
     # coco_dt = coco_gt.loadRes(coco_results)
     coco_eval = COCOeval(coco_gt, coco_dt, iou_type)
+    coco_eval.params.imgIds = coco_eval.params.imgIds[:50]
     coco_eval.evaluate()
     coco_eval.accumulate()
     coco_eval.summarize()
