@@ -5,13 +5,6 @@ from torch import nn
 
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 
-
-import math
-
-
-# from maskrcnn_benchmark.structures.bounding_box import BoxList
-
-
 from torchvision.ops import nms as box_nms
 from maskrcnn_benchmark.structures.boxlist_ops import remove_small_boxes
 from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
@@ -22,7 +15,6 @@ from maskrcnn_benchmark.modeling.rpn.utils import concat_box_prediction_layers
 
 from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import BalancedPositiveNegativeSampler
 
-from maskrcnn_benchmark.layers import smooth_l1_loss
 from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import box_iou  # move to BoxList
 
@@ -134,12 +126,7 @@ class AnchorGenerator(nn.Module):
             anchors_in_image = []
             for anchors_per_feature_map in anchors_over_all_feature_maps:
                 anchors_in_image.append(anchors_per_feature_map)
-                # boxlist = BoxList(
-                #     anchors_per_feature_map, (image_width, image_height), mode="xyxy"
-                # )
-                # anchors_in_image.append(boxlist)
             anchors.append(anchors_in_image)
-        # anchors = [cat_boxlist(anchors_per_image) for anchors_per_image in anchors]
         anchors = [cat(anchors_per_image) for anchors_per_image in anchors]
         return anchors
 
@@ -426,11 +413,10 @@ def rpn_loss(objectness, pred_bbox_deltas, labels, regression_targets, fg_bg_sam
     labels = torch.cat(labels, dim=0)
     regression_targets = torch.cat(regression_targets, dim=0)
 
-    box_loss = smooth_l1_loss(
+    box_loss = F.l1_loss(
         pred_bbox_deltas[sampled_pos_inds],
         regression_targets[sampled_pos_inds],
-        beta=1.0 / 9,
-        size_average=False,
+        reduction="sum",
     ) / (sampled_inds.numel())
 
     objectness_loss = F.binary_cross_entropy_with_logits(

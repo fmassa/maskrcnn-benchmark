@@ -4,13 +4,11 @@ import torch.nn.functional as F
 from torch import nn
 
 # inference
-# from maskrcnn_benchmark.structures.bounding_box import BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 
 # loss
 from maskrcnn_benchmark.modeling.utils import cat
-from maskrcnn_benchmark.layers import smooth_l1_loss
 
 # TwoMLPHead
 from maskrcnn_benchmark.modeling.make_layers import make_fc
@@ -155,15 +153,13 @@ def fastrcnn_loss(class_logits, box_regression, labels, regression_targets):
     # advanced indexing
     sampled_pos_inds_subset = torch.nonzero(labels > 0).squeeze(1)
     labels_pos = labels[sampled_pos_inds_subset]
-    # FIXME class_agnostic
     N, num_classes = class_logits.shape
     box_regression = box_regression.reshape(N, -1, 4)
 
-    box_loss = smooth_l1_loss(
+    box_loss = F.smooth_l1_loss(
         box_regression[sampled_pos_inds_subset, labels_pos],
         regression_targets[sampled_pos_inds_subset],
-        size_average=False,
-        beta=1,
+        reduction="sum",
     )
     box_loss = box_loss / labels.numel()
 
@@ -504,7 +500,7 @@ class RoIHeads(torch.nn.Module):
         """
 
         proposals = [
-            cat((proposal, gt_box))
+            torch.cat((proposal, gt_box))
             for proposal, gt_box in zip(proposals, gt_boxes)
         ]
 
@@ -566,11 +562,16 @@ class RoIHeads(torch.nn.Module):
             regressed_proposals = regressed_proposals.split(boxes_per_image, 0)
             class_prob = class_prob.split(boxes_per_image, 0)
 
-            result = fastrcnn_filter_proposals(regressed_proposals, class_prob, image_shapes,
+            predictions = fastrcnn_filter_proposals(regressed_proposals, class_prob, image_shapes,
                     self.score_thresh, self.nms_thresh, self.detections_per_img)
 
-            for r, image_shape in zip(result, image_shapes):
+            for p, image_shape in zip(predictions, image_shapes):
+                r = {}
+                r["boxes"] = p["boxes"]
+                r["labels"] = p["labels"]
+                r["scores"] = p["scores"]
                 r["image_size"] = torch.as_tensor(image_shape)
+                result.append(r)
 
         if self.has_mask:
             mask_proposals = [p["boxes"] for p in result]
