@@ -1,10 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 import torch
 
-from .bounding_box import BoxList
-
-from maskrcnn_benchmark.layers import nms as _box_nms
-
 
 def remove_small_boxes(boxes, min_size):
     ws, hs = boxes[:, 2] - boxes[:, 0], boxes[:, 3] - boxes[:, 1]
@@ -24,6 +20,8 @@ def clip_boxes_to_image(boxes, size):
 def box_area(box):
     return (box[:, 2] - box[:, 0]) * (box[:, 3] - box[:, 1])
 
+# implementation from https://github.com/kuangliu/torchcv/blob/master/torchcv/utils/box.py
+# with slight modifications
 def box_iou(box1, box2):
     N = len(box1)
     M = len(box2)
@@ -39,6 +37,3 @@ def box_iou(box1, box2):
 
     iou = inter / (area1[:, None] + area2 - inter)
     return iou
-
-# implementation from https://github.com/kuangliu/torchcv/blob/master/torchcv/utils/box.py
-# with slight modifications

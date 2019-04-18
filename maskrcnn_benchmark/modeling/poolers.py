@@ -35,7 +35,6 @@ class LevelMapper(object):
             boxlists (list[BoxList])
         """
         # Compute level ids
-        # s = torch.sqrt(cat([boxlist.area() for boxlist in boxlists]))
         s = torch.sqrt(cat([box_area(boxlist) for boxlist in boxlists]))
 
         # Eqn.(1) in FPN paper
@@ -78,7 +77,6 @@ class Pooler(nn.Module):
         self.map_levels = LevelMapper(lvl_min, lvl_max)
 
     def convert_to_roi_format(self, boxes):
-        # concat_boxes = cat(boxes, dim=0)
         concat_boxes = cat(boxes, dim=0)
         device, dtype = concat_boxes.device, concat_boxes.dtype
         ids = cat(

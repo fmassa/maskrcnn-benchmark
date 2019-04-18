@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 
 # inference
-from maskrcnn_benchmark.structures.bounding_box import BoxList
+# from maskrcnn_benchmark.structures.bounding_box import BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 
@@ -26,6 +26,8 @@ from maskrcnn_benchmark.structures.boxlist_ops import box_iou  # move to BoxList
 from maskrcnn_benchmark.modeling.make_layers import make_conv3x3
 from maskrcnn_benchmark.layers import Conv2d
 from maskrcnn_benchmark.layers import ConvTranspose2d
+
+from torchvision.ops import nms as box_nms
 
 
 class TwoMLPHead(nn.Module):
@@ -76,22 +78,27 @@ class FastRCNNPredictor(nn.Module):
         return scores, bbox_deltas
 
 
-from torchvision.ops import nms as box_nms
-
 def _fastrcnn_filter_proposals_in_image(boxes, prob, score_thresh, nms_thresh, detections_per_img):
     device = boxes.device
     boxes_in_image = []
     scores_in_image = []
     labels_in_image = []
+    # remove predictions with the background label
+    prob = prob[:, 1:]
+    boxes= boxes[:, 1:]
+    # split boxes and scores on a per-class list of tensors
     boxes = boxes.unbind(1)
     prob = prob.unbind(1)
     for class_id, (boxes_for_class, prob_for_class) in enumerate(zip(boxes, prob), 1):
+        # remove low scoring boxes
         inds = torch.nonzero(prob_for_class > score_thresh).squeeze(1)
         prob_for_class = prob_for_class[inds]
         boxes_for_class = boxes_for_class[inds]
+        # non-maximum suppression
         keep = box_nms(boxes_for_class, prob_for_class, nms_thresh)
         boxes_for_class = boxes_for_class[keep]
         prob_for_class = prob_for_class[keep]
+        # make label tensor
         num_boxes = len(boxes_for_class)
         label = torch.full((num_boxes,), class_id, dtype=torch.int64, device=device)
         boxes_in_image.append(boxes_for_class)
@@ -126,7 +133,6 @@ def fastrcnn_filter_proposals(regressed_proposals, class_prob, image_shapes, sco
     return predictions
 
 def fastrcnn_loss(class_logits, box_regression, labels, regression_targets):
-    # proposals, gt_boxes, labels, matched_idxs, box_coder):
     """
     Computes the loss for Faster R-CNN.
 
@@ -220,7 +226,7 @@ class MaskRCNNC4Predictor(nn.Module):
         return self.mask_fcn_logits(x)
 
 
-def maskrcnn_inference(x, boxes):
+def maskrcnn_inference(x, labels):
     """
     From the results of the CNN, post process the masks
     by taking the mask corresponding to the class with max
@@ -240,8 +246,6 @@ def maskrcnn_inference(x, boxes):
 
     # select masks coresponding to the predicted classes
     num_masks = x.shape[0]
-    # labels = [bbox.get_field("labels") for bbox in boxes]
-    labels = [r["labels"] for r in boxes]
     boxes_per_image = [len(l) for l in labels]
     labels = torch.cat(labels)
     index = torch.arange(num_masks, device=labels.device)
@@ -249,12 +253,10 @@ def maskrcnn_inference(x, boxes):
 
     mask_prob = mask_prob.split(boxes_per_image, dim=0)
 
-    for prob, box in zip(mask_prob, boxes):
-        box["mask"] = prob
-
-    return boxes
+    return mask_prob
 
 
+from torchvision.ops import roi_align
 def project_masks_on_boxes(gt_masks, boxes, matched_idxs, M):
     """
     Given segmentation masks and the bounding boxes corresponding
@@ -266,7 +268,6 @@ def project_masks_on_boxes(gt_masks, boxes, matched_idxs, M):
     matched_idxs = matched_idxs.float()
     device = boxes.device
     rois = torch.cat([matched_idxs[:, None], boxes], dim=1)
-    from torchvision.ops import roi_pool, roi_align
     return roi_align(gt_masks[:, None].float(), rois, (M, M), 1)[:, 0]
 
 
@@ -410,8 +411,6 @@ class Masker(object):
         return results
 
 
-
-
 class RoIHeads(torch.nn.Module):
     def __init__(self,
             box_roi_pool,
@@ -521,7 +520,6 @@ class RoIHeads(torch.nn.Module):
 
             gt_boxes = [t["boxes"] for t in targets]
             gt_labels = [t["labels"] for t in targets]
-            gt_masks = [t["masks"] for t in targets]
 
             # append ground-truth bboxes to propos
             proposals = self.add_gt_proposals(proposals, gt_boxes)
@@ -565,10 +563,6 @@ class RoIHeads(torch.nn.Module):
 
             class_prob = F.softmax(class_logits, -1)
 
-            # remove predictions with the background label
-            class_prob = class_prob[:, 1:]
-            regressed_proposals = regressed_proposals[:, 1:]
-
             regressed_proposals = regressed_proposals.split(boxes_per_image, 0)
             class_prob = class_prob.split(boxes_per_image, 0)
 
@@ -596,11 +590,15 @@ class RoIHeads(torch.nn.Module):
 
             loss_mask = {}
             if self.training:
+                gt_masks = [t["masks"] for t in targets]
                 loss_mask = maskrcnn_loss(mask_logits, mask_proposals,
                         gt_masks, gt_labels, mask_matched_idxs, self.mask_discretization_size)
                 loss_mask = dict(loss_mask=loss_mask)
             else:
-                result = maskrcnn_inference(mask_logits, result)
+                labels = [r["labels"] for r in result]
+                masks_probs = maskrcnn_inference(mask_logits, labels)
+                for mask_prob, r in zip(masks_probs, result):
+                    r["mask"] = mask_prob
 
             losses.update(loss_mask)
 

@@ -9,7 +9,7 @@ from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 import math
 
 
-from maskrcnn_benchmark.structures.bounding_box import BoxList
+# from maskrcnn_benchmark.structures.bounding_box import BoxList
 
 
 from torchvision.ops import nms as box_nms
@@ -341,8 +341,7 @@ class RPN(torch.nn.Module):
             l_boxes = []
             l_scores = []
             for p, s, im_shape in zip(proposals, scores, image_shapes):
-                boxlist = BoxList(p.reshape(-1, 4), im_shape, mode="xyxy")
-                p, s = self.clip_and_nms(p.reshape(-1, 4), s, im_shape)
+                p, s = self.clip_and_nms(p, s, im_shape)
                 l_boxes.append(p)
                 l_scores.append(s)
             final_boxes.append(l_boxes)
