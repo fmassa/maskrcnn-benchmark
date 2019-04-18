@@ -185,7 +185,7 @@ class MaskRCNNHeads(nn.ModuleDict):
         next_feature = input_size
         for layer_idx, layer_features in enumerate(layers, 1):
             layer_name = "mask_fcn{}".format(layer_idx)
-            conv = nn.Conv2d(next_feature, layer_features, kernel_size=3,
+            conv = Conv2d(next_feature, layer_features, kernel_size=3,
                     stride=1, padding=dilation, dilation=dilation)
             nn.init.kaiming_normal_(
                 conv.weight, mode="fan_out", nonlinearity="relu"
