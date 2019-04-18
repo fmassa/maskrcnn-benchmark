@@ -3,7 +3,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from maskrcnn_benchmark.layers import ROIAlign
+# from maskrcnn_benchmark.layers import ROIAlign
+from torchvision.ops import RoIAlign
 
 from .utils import cat
 from maskrcnn_benchmark.structures.boxlist_ops import box_area
@@ -64,7 +65,7 @@ class Pooler(nn.Module):
         poolers = []
         for scale in scales:
             poolers.append(
-                ROIAlign(
+                RoIAlign(
                     output_size, spatial_scale=scale, sampling_ratio=sampling_ratio
                 )
             )

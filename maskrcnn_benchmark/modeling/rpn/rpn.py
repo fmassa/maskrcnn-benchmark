@@ -42,9 +42,9 @@ class BufferList(nn.Module):
         return iter(self._buffers.values())
 
 
-def generate_anchors(base_size, scales, aspect_ratios):
-    scales = torch.as_tensor(scales, dtype=torch.float32)
-    aspect_ratios = torch.as_tensor(aspect_ratios, dtype=torch.float32)
+def generate_anchors(base_size, scales, aspect_ratios, device="cpu"):
+    scales = torch.as_tensor(scales, dtype=torch.float32, device=device)
+    aspect_ratios = torch.as_tensor(aspect_ratios, dtype=torch.float32, device=device)
     h_ratios = torch.sqrt(aspect_ratios)
     w_ratios = 1 / h_ratios
 
@@ -71,6 +71,7 @@ class AnchorGenerator(nn.Module):
     ):
         super(AnchorGenerator, self).__init__()
 
+
         if len(anchor_strides) == 1:
             anchor_stride = anchor_strides[0]
             cell_anchors = [
@@ -88,8 +89,27 @@ class AnchorGenerator(nn.Module):
                 )
                 for anchor_stride, size in zip(anchor_strides, sizes)
             ]
+
+        self.sizes = sizes
+        self.aspect_ratios = aspect_ratios
         self.strides = anchor_strides
         self.cell_anchors = BufferList(cell_anchors)
+        # self.cell_anchors = None
+        self._cache = {}
+
+    def set_cell_anchors(self, device):
+        if self.cell_anchors is not None:
+            return self.cell_anchors
+        cell_anchors = [
+            generate_anchors(
+                anchor_stride,
+                size if isinstance(size, (tuple, list)) else (size,),
+                self.aspect_ratios,
+                device
+            )
+            for anchor_stride, size in zip(self.strides, self.sizes)
+        ]
+        self.cell_anchors = cell_anchors
 
     def num_anchors_per_location(self):
         return [len(cell_anchors) for cell_anchors in self.cell_anchors]
@@ -118,9 +138,18 @@ class AnchorGenerator(nn.Module):
 
         return anchors
 
+    def cached_grid_anchors(self, grid_sizes):
+        if grid_sizes in self._cache:
+            return self._cache[grid_sizes]
+        anchors = self.grid_anchors(grid_sizes)
+        self._cache[grid_sizes] = anchors
+        return anchors
+
     def forward(self, image_list, feature_maps):
-        grid_sizes = [feature_map.shape[-2:] for feature_map in feature_maps]
-        anchors_over_all_feature_maps = self.grid_anchors(grid_sizes)
+        grid_sizes = tuple([feature_map.shape[-2:] for feature_map in feature_maps])
+        # anchors_over_all_feature_maps = self.grid_anchors(grid_sizes)
+        # self.set_cell_anchors(feature_maps[0].device)
+        anchors_over_all_feature_maps = self.cached_grid_anchors(grid_sizes)
         anchors = []
         for i, (image_height, image_width) in enumerate(image_list.image_sizes):
             anchors_in_image = []
@@ -129,23 +158,6 @@ class AnchorGenerator(nn.Module):
             anchors.append(anchors_in_image)
         anchors = [cat(anchors_per_image) for anchors_per_image in anchors]
         return anchors
-
-
-
-def box_is_inside_image(boxes, image_size, straddle_thresh=0):
-    image_width, image_height = image_size
-    if straddle_thresh >= 0:
-        inds_inside = (
-            (boxes[..., 0] >= -straddle_thresh)
-            & (boxes[..., 1] >= -straddle_thresh)
-            & (boxes[..., 2] < image_width + straddle_thresh)
-            & (boxes[..., 3] < image_height + straddle_thresh)
-        )
-    else:
-        device = boxes.device
-        inds_inside = torch.ones(boxes.shape[0], dtype=torch.uint8, device=device)
-    return inds_inside
-
 
 
 class RPNHead(nn.Module):
@@ -237,10 +249,6 @@ class RPN(torch.nn.Module):
             # Background (negative examples)
             bg_indices = matched_idxs == self.proposal_matcher.BELOW_LOW_THRESHOLD
             labels_per_image[bg_indices] = 0
-
-            # discard anchors that go out of the boundaries of the image
-            # inds_inside = box_is_inside_image(anchors_per_image, image_size)
-            # labels_per_image[~inds_inside] = -1
 
             # discard indices that are between thresholds
             inds_to_discard = matched_idxs == self.proposal_matcher.BETWEEN_THRESHOLDS

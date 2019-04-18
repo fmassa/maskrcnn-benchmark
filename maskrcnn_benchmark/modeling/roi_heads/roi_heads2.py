@@ -11,7 +11,6 @@ from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 from maskrcnn_benchmark.modeling.utils import cat
 
 # TwoMLPHead
-from maskrcnn_benchmark.modeling.make_layers import make_fc
 
 # StandardRoiHead
 from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
@@ -21,7 +20,6 @@ from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import box_iou  # move to BoxList
 
 # Mask
-from maskrcnn_benchmark.modeling.make_layers import make_conv3x3
 from maskrcnn_benchmark.layers import Conv2d
 from maskrcnn_benchmark.layers import ConvTranspose2d
 
@@ -39,9 +37,12 @@ class TwoMLPHead(nn.Module):
             ):
         super(TwoMLPHead, self).__init__()
 
-        self.fc6 = make_fc(in_channels, representation_size, use_gn)
-        self.fc7 = make_fc(representation_size, representation_size, use_gn)
+        self.fc6 = nn.Linear(in_channels, representation_size)
+        self.fc7 = nn.Linear(representation_size, representation_size)
         self.out_channels = representation_size
+        for fc in self.children():
+            nn.init.kaiming_uniform_(fc.weight, a=1)
+            nn.init.constant_(fc.bias, 0)
 
     def forward(self, x):
         x = x.view(x.size(0), -1)
@@ -186,11 +187,13 @@ class MaskRCNNHeads(nn.ModuleDict):
         next_feature = input_size
         for layer_idx, layer_features in enumerate(layers, 1):
             layer_name = "mask_fcn{}".format(layer_idx)
-            module = make_conv3x3(
-                next_feature, layer_features,
-                dilation=dilation, stride=1, use_gn=use_gn
+            conv = nn.Conv2d(next_feature, layer_features, kernel_size=3,
+                    stride=1, padding=dilation, dilation=dilation)
+            nn.init.kaiming_normal_(
+                conv.weight, mode="fan_out", nonlinearity="relu"
             )
-            self[layer_name] = module
+            nn.init.constant_(conv.bias, 0)
+            self[layer_name] = conv
             next_feature = layer_features
         self.out_channels = layer_features
 
