@@ -12,8 +12,6 @@ import math
 from maskrcnn_benchmark.structures.bounding_box import BoxList
 
 
-from maskrcnn_benchmark.structures.boxlist_ops import cat_boxlist
-# from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms
 from torchvision.ops import nms as box_nms
 from maskrcnn_benchmark.structures.boxlist_ops import remove_small_boxes
 from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
@@ -26,7 +24,6 @@ from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import Balan
 
 from maskrcnn_benchmark.layers import smooth_l1_loss
 from maskrcnn_benchmark.modeling.matcher import Matcher
-# from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 from maskrcnn_benchmark.structures.boxlist_ops import box_iou  # move to BoxList
 
 
@@ -217,7 +214,6 @@ class RPN(torch.nn.Module):
         self.box_coder = BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
 
         # used during training
-        # self.box_similarity = boxlist_iou
         self.box_similarity = box_iou
 
         self.proposal_matcher = Matcher(

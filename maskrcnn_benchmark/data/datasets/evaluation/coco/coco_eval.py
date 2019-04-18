@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from maskrcnn_benchmark.modeling.roi_heads.roi_heads2 import Masker
 from maskrcnn_benchmark.structures.bounding_box import BoxList
-from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
+from maskrcnn_benchmark.structures.boxlist_ops import box_iou
 
 
 
@@ -365,7 +365,7 @@ def evaluate_box_proposals(
         if limit is not None and len(prediction) > limit:
             prediction = prediction[:limit]
 
-        overlaps = boxlist_iou(prediction, gt_boxes)
+        overlaps = box_iou(prediction.bbox, gt_boxes.bbox)
 
         _gt_overlaps = torch.zeros(len(gt_boxes))
         for j in range(min(len(prediction), len(gt_boxes))):

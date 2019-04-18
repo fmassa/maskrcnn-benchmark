@@ -5,8 +5,6 @@ from torch import nn
 
 # inference
 from maskrcnn_benchmark.structures.bounding_box import BoxList
-from maskrcnn_benchmark.structures.boxlist_ops import boxlist_nms  # move to BoxList
-from maskrcnn_benchmark.structures.boxlist_ops import cat_boxlist  # move to BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 
@@ -257,52 +255,14 @@ def maskrcnn_inference(x, boxes):
     return boxes
 
 
-def new_prop(segmetation_masks, proposals, M):
-    masks = proposals.get_field('matched_masks2')
-    boxes = proposals.bbox
-    device = boxes.device
-    masks = torch.stack(list(masks), 0)
-    rois = torch.cat([torch.arange(boxes.shape[0], dtype=boxes.dtype, device=device)[:, None], boxes], dim=1)
-    from torchvision.ops import roi_pool, roi_align
-    return roi_align(masks[:, None].float(), rois, (M, M), 1)[:, 0]
-
-def project_masks_on_boxes(segmentation_masks, proposals, discretization_size):
+def project_masks_on_boxes(gt_masks, boxes, matched_idxs, M):
     """
     Given segmentation masks and the bounding boxes corresponding
     to the location of the masks in the image, this function
     crops and resizes the masks in the position defined by the
     boxes. This prepares the masks for them to be fed to the
     loss computation as the targets.
-
-    Arguments:
-        segmentation_masks: an instance of SegmentationMask
-        proposals: an instance of BoxList
     """
-    masks = []
-    M = discretization_size
-    device = proposals.bbox.device
-    proposals = proposals.convert("xyxy")
-    assert segmentation_masks.size == proposals.size, "{}, {}".format(
-        segmentation_masks, proposals
-    )
-    # TODO put the proposals on the CPU, as the representation for the
-    # masks is not efficient GPU-wise (possibly several small tensors for
-    # representing a single instance mask)
-    proposals = proposals.bbox.to(torch.device("cpu"))
-    for segmentation_mask, proposal in zip(segmentation_masks, proposals):
-        # crop the masks, resize them to the desired resolution and
-        # then convert them to the tensor representation,
-        # instead of the list representation that was used
-        cropped_mask = segmentation_mask.crop(proposal)
-        scaled_mask = cropped_mask.resize((M, M))
-        mask = scaled_mask.convert(mode="mask")
-        masks.append(mask)
-    if len(masks) == 0:
-        return torch.empty(0, dtype=torch.float32, device=device)
-    return torch.stack(masks, dim=0).to(device, dtype=torch.float32)
-
-
-def new_prop0(gt_masks, boxes, matched_idxs, M):
     matched_idxs = matched_idxs.float()
     device = boxes.device
     rois = torch.cat([matched_idxs[:, None], boxes], dim=1)
@@ -322,7 +282,7 @@ def maskrcnn_loss(mask_logits, proposals, gt_masks, gt_labels, mask_matched_idxs
     """
 
     labels = [l[idxs] for l, idxs in zip(gt_labels, mask_matched_idxs)]
-    mask_targets = [new_prop0(m, p, i, discretization_size) for m, p, i in zip(gt_masks, proposals, mask_matched_idxs)]
+    mask_targets = [project_masks_on_boxes(m, p, i, discretization_size) for m, p, i in zip(gt_masks, proposals, mask_matched_idxs)]
 
     labels = cat(labels, dim=0)
     mask_targets = cat(mask_targets, dim=0)
@@ -422,7 +382,6 @@ class Masker(object):
 
     def forward_single_image(self, masks, prediction):
         # boxes = boxes.convert("xyxy")
-        # im_w, im_h = boxes.size
         im_h, im_w = prediction["image_size"].tolist()
         res = [
             paste_mask_in_image(mask[0], box, im_h, im_w, self.threshold, self.padding)
@@ -435,8 +394,6 @@ class Masker(object):
         return res
 
     def __call__(self, masks, prediction):
-        # if isinstance(boxes, BoxList):
-        #     boxes = [boxes]
         if isinstance(prediction, dict):
             prediction = [prediction]
 
