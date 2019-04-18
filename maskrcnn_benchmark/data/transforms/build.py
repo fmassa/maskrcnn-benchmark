@@ -7,7 +7,7 @@ def build_transforms(cfg, is_train=True):
         min_size = cfg.INPUT.MIN_SIZE_TRAIN
         max_size = cfg.INPUT.MAX_SIZE_TRAIN
         flip_prob = 0.5  # cfg.INPUT.FLIP_PROB_TRAIN
-        resize = T.RandomResizeCrop(min_size[0], 0)
+        resize = T.RandomResizeCrop(min_size[0], 1.5)
     else:
         min_size = cfg.INPUT.MIN_SIZE_TEST
         max_size = cfg.INPUT.MAX_SIZE_TEST

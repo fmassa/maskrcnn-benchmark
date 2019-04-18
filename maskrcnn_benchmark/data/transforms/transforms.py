@@ -24,7 +24,7 @@ class Compose(object):
         return format_string
 
 class RandomResizeCrop(object):
-    def __init__(self, size, scale=1.5):
+    def __init__(self, size, scale):
         #  if not isinstance(min_size, (list, tuple)):
         #    size = (size,)
         self.size = size
@@ -45,7 +45,8 @@ class RandomResizeCrop(object):
                 return i, j
 
     def __call__(self, image, target):
-        image = F.resize(image, int(self.size * self.scale))
+        s = int(self.size * self.scale)
+        image = F.resize(image, s)
         target = target.resize(image.size)
         i, j = self.get_params(target)
         t = target
