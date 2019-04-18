@@ -80,7 +80,11 @@ class COCODataset(torchvision.datasets.coco.CocoDetection):
             img, target = self.transforms(img, target)
 
         masks = target.get_field("masks")
-        masks = torch.stack([mask.convert(mode="mask") for mask in masks], 0)
+        masks = [mask.convert(mode="mask") for mask in masks]
+        if masks:
+            masks = torch.stack(masks, 0)
+        else:
+            masks = torch.empty((0, target.size[1], target.size[0]), dtype=torch.uint8)
         target.add_field("masks", masks)
 
         t = {}
