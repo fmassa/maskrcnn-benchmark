@@ -23,6 +23,40 @@ class Compose(object):
         format_string += "\n)"
         return format_string
 
+class RandomResizeCrop(object):
+    def __init__(self, size, scale=1.5):
+        #  if not isinstance(min_size, (list, tuple)):
+        #    size = (size,)
+        self.size = size
+        self.scale = scale
+
+    def get_params(self, boxlist):
+        boxlist = boxlist.copy_with_fields([])
+        while True:
+            i = random.randint(0, boxlist.size[0] - self.size)
+            j = random.randint(0, boxlist.size[1] - self.size)
+
+            tb = boxlist.crop((i, j, i + self.size, j + self.size))
+            keep = tb.area() > 0
+            # boxlist = boxlist.clip_to_image(remove_empty=True)
+            tb = tb[keep]
+            # if (area > 0).any():
+            if len(tb) > 0:
+                return i, j
+
+    def __call__(self, image, target):
+        image = F.resize(image, int(self.size * self.scale))
+        target = target.resize(image.size)
+        i, j = self.get_params(target)
+        t = target
+        image = F.crop(image, j, i, self.size, self.size)
+        target = target.crop((i, j, i + self.size, j + self.size))
+        keep = target.area() > 0
+        target = target[keep]
+        # print(i, j, self.size, t, target)
+        # print(target)
+        return image, target
+
 
 class Resize(object):
     def __init__(self, min_size, max_size):
