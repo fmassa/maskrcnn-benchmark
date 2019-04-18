@@ -9,8 +9,6 @@ from torchvision.ops import nms as box_nms
 from maskrcnn_benchmark.structures.boxlist_ops import remove_small_boxes
 from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
 
-
-from maskrcnn_benchmark.modeling.utils import cat
 from maskrcnn_benchmark.modeling.rpn.utils import concat_box_prediction_layers
 
 from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import BalancedPositiveNegativeSampler
@@ -156,7 +154,7 @@ class AnchorGenerator(nn.Module):
             for anchors_per_feature_map in anchors_over_all_feature_maps:
                 anchors_in_image.append(anchors_per_feature_map)
             anchors.append(anchors_in_image)
-        anchors = [cat(anchors_per_image) for anchors_per_image in anchors]
+        anchors = [torch.cat(anchors_per_image) for anchors_per_image in anchors]
         return anchors
 
 
@@ -344,8 +342,8 @@ class RPN(torch.nn.Module):
 
         final_boxes = list(zip(*final_boxes))
         final_scores = list(zip(*final_scores))
-        final_boxes = [cat(x) for x in final_boxes]
-        final_scores = [cat(x) for x in final_scores]
+        final_boxes = [torch.cat(x) for x in final_boxes]
+        final_scores = [torch.cat(x) for x in final_scores]
         for i in range(len(final_boxes)):
             boxes, scores = self.limit_max_proposals(final_boxes[i], final_scores[i])
             final_boxes[i] = boxes

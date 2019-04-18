@@ -3,8 +3,6 @@
 Utility functions minipulating the prediction layers
 """
 
-from ..utils import cat
-
 import torch
 
 def permute_and_flatten(layer, N, A, C, H, W):
@@ -40,6 +38,6 @@ def concat_box_prediction_layers(box_cls, box_regression):
     # concatenate on the first dimension (representing the feature levels), to
     # take into account the way the labels were generated (with all feature maps
     # being concatenated as well)
-    box_cls = cat(box_cls_flattened, dim=1).reshape(-1, C)
-    box_regression = cat(box_regression_flattened, dim=1).reshape(-1, 4)
+    box_cls = torch.cat(box_cls_flattened, dim=1).reshape(-1, C)
+    box_regression = torch.cat(box_regression_flattened, dim=1).reshape(-1, 4)
     return box_cls, box_regression

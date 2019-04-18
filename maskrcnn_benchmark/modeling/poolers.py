@@ -3,10 +3,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-# from maskrcnn_benchmark.layers import ROIAlign
 from torchvision.ops import RoIAlign
 
-from .utils import cat
 from maskrcnn_benchmark.structures.boxlist_ops import box_area
 
 
@@ -36,7 +34,7 @@ class LevelMapper(object):
             boxlists (list[BoxList])
         """
         # Compute level ids
-        s = torch.sqrt(cat([box_area(boxlist) for boxlist in boxlists]))
+        s = torch.sqrt(torch.cat([box_area(boxlist) for boxlist in boxlists]))
 
         # Eqn.(1) in FPN paper
         target_lvls = torch.floor(self.lvl0 + torch.log2(s / self.s0 + self.eps))
@@ -78,9 +76,9 @@ class Pooler(nn.Module):
         self.map_levels = LevelMapper(lvl_min, lvl_max)
 
     def convert_to_roi_format(self, boxes):
-        concat_boxes = cat(boxes, dim=0)
+        concat_boxes = torch.cat(boxes, dim=0)
         device, dtype = concat_boxes.device, concat_boxes.dtype
-        ids = cat(
+        ids = torch.cat(
             [
                 torch.full((len(b), 1), i, dtype=dtype, device=device)
                 for i, b in enumerate(boxes)

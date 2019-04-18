@@ -7,8 +7,6 @@ from torch import nn
 from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 
-# loss
-from maskrcnn_benchmark.modeling.utils import cat
 
 # TwoMLPHead
 
@@ -144,8 +142,8 @@ def fastrcnn_loss(class_logits, box_regression, labels, regression_targets):
         box_loss (Tensor)
     """
 
-    labels = cat(labels, dim=0)
-    regression_targets = cat(regression_targets, dim=0)
+    labels = torch.cat(labels, dim=0)
+    regression_targets = torch.cat(regression_targets, dim=0)
 
     classification_loss = F.cross_entropy(class_logits, labels)
 
@@ -284,8 +282,8 @@ def maskrcnn_loss(mask_logits, proposals, gt_masks, gt_labels, mask_matched_idxs
     labels = [l[idxs] for l, idxs in zip(gt_labels, mask_matched_idxs)]
     mask_targets = [project_masks_on_boxes(m, p, i, discretization_size) for m, p, i in zip(gt_masks, proposals, mask_matched_idxs)]
 
-    labels = cat(labels, dim=0)
-    mask_targets = cat(mask_targets, dim=0)
+    labels = torch.cat(labels, dim=0)
+    mask_targets = torch.cat(mask_targets, dim=0)
 
     # torch.mean (in binary_cross_entropy_with_logits) doesn't
     # accept empty tensors, so handle it separately
