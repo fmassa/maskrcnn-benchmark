@@ -32,12 +32,17 @@ class RandomResizeCrop(object):
 
     def get_params(self, boxlist):
         boxlist = boxlist.copy_with_fields([])
+        count = 0
         while True:
+            count += 1
             i = random.randint(0, boxlist.size[0] - self.size)
             j = random.randint(0, boxlist.size[1] - self.size)
 
             tb = boxlist.crop((i, j, i + self.size, j + self.size))
-            keep = tb.area() > 0
+            # keep = tb.area() > 0
+            keep = tb.area() > 32 * 32
+            if count > 10:
+                keep = tb.area() > 0
             # boxlist = boxlist.clip_to_image(remove_empty=True)
             tb = tb[keep]
             # if (area > 0).any():
