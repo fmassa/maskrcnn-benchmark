@@ -5,7 +5,7 @@ from torch import nn
 
 from torchvision.ops import RoIAlign
 
-from maskrcnn_benchmark.structures.boxlist_ops import box_area
+from torchvision.ops.boxes import box_area
 
 
 class LevelMapper(object):

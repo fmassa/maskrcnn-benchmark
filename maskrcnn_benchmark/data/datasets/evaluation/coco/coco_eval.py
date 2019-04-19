@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from maskrcnn_benchmark.modeling.roi_heads.roi_heads2 import Masker
 from maskrcnn_benchmark.structures.bounding_box import BoxList
-from maskrcnn_benchmark.structures.boxlist_ops import box_iou
+from torchvision.ops.boxes import box_iou
 
 
 

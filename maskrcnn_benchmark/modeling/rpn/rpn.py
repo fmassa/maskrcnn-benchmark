@@ -4,17 +4,13 @@ from torch.nn import functional as F
 from torch import nn
 
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
-
-from torchvision.ops import nms as box_nms
-from maskrcnn_benchmark.structures.boxlist_ops import remove_small_boxes
-from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
+from torchvision.ops import boxes as box_ops
 
 from maskrcnn_benchmark.modeling.rpn.utils import concat_box_prediction_layers
 
 from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import BalancedPositiveNegativeSampler
 
 from maskrcnn_benchmark.modeling.matcher import Matcher
-from maskrcnn_benchmark.structures.boxlist_ops import box_iou  # move to BoxList
 
 
 class BufferList(nn.Module):
@@ -178,7 +174,7 @@ class RPNHead(nn.Module):
             in_channels, num_anchors * 4, kernel_size=1, stride=1
         )
 
-        for l in [self.conv, self.cls_logits, self.bbox_pred]:
+        for l in self.children():
             torch.nn.init.normal_(l.weight, std=0.01)
             torch.nn.init.constant_(l.bias, 0)
 
@@ -211,7 +207,7 @@ class RPN(torch.nn.Module):
         self.box_coder = BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
 
         # used during training
-        self.box_similarity = box_iou
+        self.box_similarity = box_ops.box_iou
 
         self.proposal_matcher = Matcher(
             fg_iou_thresh,
@@ -304,12 +300,12 @@ class RPN(torch.nn.Module):
 
 
     def clip_and_nms(self, boxes, objectness, image_size):
-        boxlist = clip_boxes_to_image(boxes, image_size)
-        keep = remove_small_boxes(boxes, self.min_size)
+        boxlist = box_ops.clip_boxes_to_image(boxes, image_size)
+        keep = box_ops.remove_small_boxes(boxes, self.min_size)
         boxes = boxes[keep]
         objectness = objectness[keep]
 
-        keep = box_nms(boxes, objectness, self.post_nms_top_n)
+        keep = box_ops.nms(boxes, objectness, self.post_nms_top_n)
         boxes = boxes[keep]
         objectness = objectness[keep]
         return boxes, objectness

@@ -3,25 +3,23 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from torchvision.ops import boxes as box_ops
+
 # inference
-from maskrcnn_benchmark.structures.boxlist_ops import clip_boxes_to_image  # move to BoxList
 from maskrcnn_benchmark.modeling.box_coder import BoxCoder
-
-
-# TwoMLPHead
 
 # StandardRoiHead
 from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
     BalancedPositiveNegativeSampler
 )
 from maskrcnn_benchmark.modeling.matcher import Matcher
-from maskrcnn_benchmark.structures.boxlist_ops import box_iou  # move to BoxList
 
 # Mask
 from maskrcnn_benchmark.layers import Conv2d
 from maskrcnn_benchmark.layers import ConvTranspose2d
+from maskrcnn_benchmark.layers.misc import interpolate
 
-from torchvision.ops import nms as box_nms
+from torchvision.ops import roi_align
 
 
 class TwoMLPHead(nn.Module):
@@ -74,12 +72,11 @@ class FastRCNNPredictor(nn.Module):
 
         return scores, bbox_deltas
 
-
-def _fastrcnn_filter_proposals_in_image(boxes, prob, score_thresh, nms_thresh, detections_per_img):
+def multiclass_nms(boxes, prob, score_thresh, nms_thresh):
     device = boxes.device
-    boxes_in_image = []
-    scores_in_image = []
-    labels_in_image = []
+    selected_boxes = []
+    selected_scores = []
+    selected_labels = []
     # remove predictions with the background label
     prob = prob[:, 1:]
     boxes= boxes[:, 1:]
@@ -92,42 +89,33 @@ def _fastrcnn_filter_proposals_in_image(boxes, prob, score_thresh, nms_thresh, d
         prob_for_class = prob_for_class[inds]
         boxes_for_class = boxes_for_class[inds]
         # non-maximum suppression
-        keep = box_nms(boxes_for_class, prob_for_class, nms_thresh)
+        keep = box_ops.nms(boxes_for_class, prob_for_class, nms_thresh)
         boxes_for_class = boxes_for_class[keep]
         prob_for_class = prob_for_class[keep]
         # make label tensor
         num_boxes = len(boxes_for_class)
         label = torch.full((num_boxes,), class_id, dtype=torch.int64, device=device)
-        boxes_in_image.append(boxes_for_class)
-        scores_in_image.append(prob_for_class)
-        labels_in_image.append(label)
-    boxes_in_image = torch.cat(boxes_in_image, dim=0)
-    scores_in_image = torch.cat(scores_in_image, dim=0)
-    labels_in_image = torch.cat(labels_in_image, dim=0)
+        selected_boxes.append(boxes_for_class)
+        selected_scores.append(prob_for_class)
+        selected_labels.append(label)
+    selected_boxes = torch.cat(selected_boxes, dim=0)
+    selected_scores = torch.cat(selected_scores, dim=0)
+    selected_labels = torch.cat(selected_labels, dim=0)
+    return selected_boxes, selected_scores, selected_labels
 
-    number_of_detections = len(boxes_in_image)
+def keep_max_detections(boxes, scores, labels, detections_per_img):
+    number_of_detections = len(boxes)
     # Limit to max_per_image detections **over all classes**
     if number_of_detections > detections_per_img > 0:
         image_thresh, _ = torch.kthvalue(
-            scores_in_image.cpu(), number_of_detections - detections_per_img + 1
+            scores.cpu(), number_of_detections - detections_per_img + 1
         )
-        keep = scores_in_image >= image_thresh.item()
+        keep = scores >= image_thresh.item()
         keep = torch.nonzero(keep).squeeze(1)
-        boxes_in_image = boxes_in_image[keep]
-        scores_in_image = scores_in_image[keep]
-        labels_in_image = labels_in_image[keep]
-    result = {}
-    result["boxes"] = boxes_in_image
-    result["scores"] = scores_in_image
-    result["labels"] = labels_in_image
-    return result
-
-def fastrcnn_filter_proposals(regressed_proposals, class_prob, image_shapes, score_thresh, nms_thresh, detections_per_img):
-    predictions = []
-    for boxes, prob, image_shape in zip(regressed_proposals, class_prob, image_shapes):
-        boxes = clip_boxes_to_image(boxes, image_shape)
-        predictions.append(_fastrcnn_filter_proposals_in_image(boxes, prob, score_thresh, nms_thresh, detections_per_img))
-    return predictions
+        boxes = boxes[keep]
+        scores = scores[keep]
+        labels = labels[keep]
+    return boxes, scores, labels
 
 
 def fastrcnn_loss(class_logits, box_regression, labels, regression_targets):
@@ -254,7 +242,6 @@ def maskrcnn_inference(x, labels):
     return mask_prob
 
 
-from torchvision.ops import roi_align
 def project_masks_on_boxes(gt_masks, boxes, matched_idxs, M):
     """
     Given segmentation masks and the bounding boxes corresponding
@@ -329,7 +316,7 @@ def expand_masks(mask, padding):
     padded_mask[:, :, padding:-padding, padding:-padding] = mask
     return padded_mask, scale
 
-from maskrcnn_benchmark.layers.misc import interpolate
+
 def paste_mask_in_image(mask, box, im_h, im_w, thresh=0.5, padding=1):
     padded_mask, scale = expand_masks(mask[None], padding=padding)
     mask = padded_mask[0, 0]
@@ -430,7 +417,7 @@ class RoIHeads(torch.nn.Module):
             ):
         super(RoIHeads, self).__init__()
 
-        self.box_similarity = box_iou
+        self.box_similarity = box_ops.box_iou
         # assign ground-truth boxes for each proposal
         self.proposal_matcher = Matcher(
             fg_iou_thresh,
@@ -543,24 +530,34 @@ class RoIHeads(torch.nn.Module):
 
         return proposals, matched_idxs, labels, regression_targets
 
-    def fastrcnn_predictions(self, class_logits, box_regression, proposals, image_shapes):
+    def postprocess_detections(self, class_logits, box_regression, proposals, image_shapes):
         boxes_per_image = [len(boxes_in_image) for boxes_in_image in proposals]
 
         concat_proposals = torch.cat(proposals, dim=0)
-        regressed_proposals = self.box_coder.decode(
+        pred_boxes = self.box_coder.decode(
             box_regression.view(sum(boxes_per_image), -1), concat_proposals
         )
 
-        regressed_proposals = regressed_proposals.reshape(sum(boxes_per_image), -1, 4)
+        pred_boxes = pred_boxes.reshape(sum(boxes_per_image), -1, 4)
 
-        class_prob = F.softmax(class_logits, -1)
+        pred_scores = F.softmax(class_logits, -1)
 
-        regressed_proposals = regressed_proposals.split(boxes_per_image, 0)
-        class_prob = class_prob.split(boxes_per_image, 0)
+        # split boxes and scores per image
+        pred_boxes = pred_boxes.split(boxes_per_image, 0)
+        pred_scores = pred_scores.split(boxes_per_image, 0)
 
-        predictions = fastrcnn_filter_proposals(regressed_proposals, class_prob, image_shapes,
-                self.score_thresh, self.nms_thresh, self.detections_per_img)
-        return predictions
+        all_boxes = []
+        all_scores = []
+        all_labels = []
+        for boxes, scores, image_shape in zip(pred_boxes, pred_scores, image_shapes):
+            boxes = box_ops.clip_boxes_to_image(boxes, image_shape)
+            boxes, scores, labels = multiclass_nms(boxes, scores, self.score_thresh, self.nms_thresh)
+            boxes, scores, labels = keep_max_detections(boxes, scores, labels, self.detections_per_img)
+            all_boxes.append(boxes)
+            all_scores.append(scores)
+            all_labels.append(labels)
+
+        return all_boxes, all_scores, all_labels
 
     def forward(self, features, proposals, image_shapes, targets=None):
         if self.training:
@@ -577,13 +574,13 @@ class RoIHeads(torch.nn.Module):
                 class_logits, box_regression, labels, regression_targets)
             losses = dict(loss_classifier=loss_classifier, loss_box_reg=loss_box_reg)
         else:
-            predictions = self.fastrcnn_predictions(class_logits, box_regression, proposals, image_shapes)
+            boxes, scores, labels = self.postprocess_detections(class_logits, box_regression, proposals, image_shapes)
 
-            for p, image_shape in zip(predictions, image_shapes):
+            for b, s, l, image_shape in zip(boxes, scores, labels, image_shapes):
                 r = {}
-                r["boxes"] = p["boxes"]
-                r["labels"] = p["labels"]
-                r["scores"] = p["scores"]
+                r["boxes"] = b
+                r["labels"] = l
+                r["scores"] = s
                 r["image_size"] = torch.as_tensor(image_shape)
                 result.append(r)
 

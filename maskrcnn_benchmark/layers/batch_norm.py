@@ -3,7 +3,7 @@ import torch
 from torch import nn
 
 
-class FrozenBatchNorm2d(nn.Module):
+class FrozenBatchNorm2d(torch.jit.ScriptModule):
     """
     BatchNorm2d where the batch statistics and the affine parameters
     are fixed
@@ -16,9 +16,14 @@ class FrozenBatchNorm2d(nn.Module):
         self.register_buffer("running_mean", torch.zeros(n))
         self.register_buffer("running_var", torch.ones(n))
 
+    @torch.jit.script_method
     def forward(self, x):
-        scale = self.weight * self.running_var.rsqrt()
-        bias = self.bias - self.running_mean * scale
-        scale = scale.reshape(1, -1, 1, 1)
-        bias = bias.reshape(1, -1, 1, 1)
+        # move reshapes to the beginning
+        # to make it fuser-friendly
+        w = self.weight.reshape(1, -1, 1, 1)
+        b = self.bias.reshape(1, -1, 1, 1)
+        rv = self.running_var.reshape(1, -1, 1, 1)
+        rm = self.running_mean.reshape(1, -1, 1, 1)
+        scale = w * rv.rsqrt()
+        bias = b - rm * scale
         return x * scale + bias

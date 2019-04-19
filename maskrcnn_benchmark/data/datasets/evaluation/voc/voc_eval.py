@@ -6,7 +6,7 @@ import os
 from collections import defaultdict
 import numpy as np
 from maskrcnn_benchmark.structures.bounding_box import BoxList
-from maskrcnn_benchmark.structures.boxlist_ops import box_iou
+from torchvision.ops.boxes import box_iou
 
 
 def do_voc_evaluation(dataset, predictions, output_folder, logger):
