@@ -15,9 +15,7 @@ from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
 from maskrcnn_benchmark.modeling.matcher import Matcher
 
 # Mask
-from maskrcnn_benchmark.layers import Conv2d
-from maskrcnn_benchmark.layers import ConvTranspose2d
-from maskrcnn_benchmark.layers.misc import interpolate
+from torchvision.ops import misc as misc_nn_ops
 
 from torchvision.ops import roi_align
 
@@ -174,7 +172,7 @@ class MaskRCNNHeads(nn.ModuleDict):
         next_feature = input_size
         for layer_idx, layer_features in enumerate(layers, 1):
             layer_name = "mask_fcn{}".format(layer_idx)
-            conv = Conv2d(next_feature, layer_features, kernel_size=3,
+            conv = misc_nn_ops.Conv2d(next_feature, layer_features, kernel_size=3,
                     stride=1, padding=dilation, dilation=dilation)
             nn.init.kaiming_normal_(
                 conv.weight, mode="fan_out", nonlinearity="relu"
@@ -196,8 +194,8 @@ class MaskRCNNC4Predictor(nn.Module):
         super(MaskRCNNC4Predictor, self).__init__()
         num_inputs = in_channels
 
-        self.conv5_mask = ConvTranspose2d(num_inputs, dim_reduced, 2, 2, 0)
-        self.mask_fcn_logits = Conv2d(dim_reduced, num_classes, 1, 1, 0)
+        self.conv5_mask = misc_nn_ops.ConvTranspose2d(num_inputs, dim_reduced, 2, 2, 0)
+        self.mask_fcn_logits = misc_nn_ops.Conv2d(dim_reduced, num_classes, 1, 1, 0)
 
         for name, param in self.named_parameters():
             if "bias" in name:
@@ -334,7 +332,7 @@ def paste_mask_in_image(mask, box, im_h, im_w, thresh=0.5, padding=1):
 
     # Resize mask
     mask = mask.to(torch.float32)
-    mask = interpolate(mask, size=(h, w), mode='bilinear', align_corners=False)
+    mask = misc_nn_ops.interpolate(mask, size=(h, w), mode='bilinear', align_corners=False)
     mask = mask[0][0]
 
     if thresh >= 0:
