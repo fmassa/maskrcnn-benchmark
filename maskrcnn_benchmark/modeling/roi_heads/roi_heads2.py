@@ -129,6 +129,7 @@ def fastrcnn_filter_proposals(regressed_proposals, class_prob, image_shapes, sco
         predictions.append(_fastrcnn_filter_proposals_in_image(boxes, prob, score_thresh, nms_thresh, detections_per_img))
     return predictions
 
+
 def fastrcnn_loss(class_logits, box_regression, labels, regression_targets):
     """
     Computes the loss for Faster R-CNN.
@@ -507,30 +508,63 @@ class RoIHeads(torch.nn.Module):
 
         return proposals
 
+    def check_targets(self, targets):
+        assert targets is not None
+        assert all("boxes" in t for t in targets)
+        assert all("labels" in t for t in targets)
+        if self.has_mask:
+            assert all("masks" in t for t in targets)
+
+    def select_training_samples(self, proposals, targets):
+        self.check_targets(targets)
+        gt_boxes = [t["boxes"] for t in targets]
+        gt_labels = [t["labels"] for t in targets]
+
+        # append ground-truth bboxes to propos
+        proposals = self.add_gt_proposals(proposals, gt_boxes)
+
+        # get matching gt indices for each proposal
+        matched_idxs, labels = self.assign_targets_to_proposals(proposals, gt_boxes, gt_labels)
+        # sample a fixed proportion of positive-negative proposals
+        sampled_inds = self.subsample(labels)
+        num_images = len(proposals)
+        for img_id in range(num_images):
+            img_sampled_inds = sampled_inds[img_id]
+            proposals[img_id] = proposals[img_id][img_sampled_inds]
+            labels[img_id] = labels[img_id][img_sampled_inds]
+            matched_idxs[img_id] = matched_idxs[img_id][img_sampled_inds]
+
+        regression_targets = []
+        for proposals_per_image, gt_boxes_in_image, matched_idxs_in_image in zip(
+                proposals, gt_boxes, matched_idxs):
+            matched_gt_boxes = gt_boxes_in_image[matched_idxs_in_image]
+            regression_targets_per_image = self.box_coder.encode(matched_gt_boxes, proposals_per_image)
+            regression_targets.append(regression_targets_per_image)
+
+        return proposals, matched_idxs, labels, regression_targets
+
+    def fastrcnn_predictions(self, class_logits, box_regression, proposals, image_shapes):
+        boxes_per_image = [len(boxes_in_image) for boxes_in_image in proposals]
+
+        concat_proposals = torch.cat(proposals, dim=0)
+        regressed_proposals = self.box_coder.decode(
+            box_regression.view(sum(boxes_per_image), -1), concat_proposals
+        )
+
+        regressed_proposals = regressed_proposals.reshape(sum(boxes_per_image), -1, 4)
+
+        class_prob = F.softmax(class_logits, -1)
+
+        regressed_proposals = regressed_proposals.split(boxes_per_image, 0)
+        class_prob = class_prob.split(boxes_per_image, 0)
+
+        predictions = fastrcnn_filter_proposals(regressed_proposals, class_prob, image_shapes,
+                self.score_thresh, self.nms_thresh, self.detections_per_img)
+        return predictions
+
     def forward(self, features, proposals, image_shapes, targets=None):
         if self.training:
-            assert targets is not None
-            assert all("boxes" in t for t in targets)
-            assert all("labels" in t for t in targets)
-            if self.has_mask:
-                assert all("masks" in t for t in targets)
-
-            gt_boxes = [t["boxes"] for t in targets]
-            gt_labels = [t["labels"] for t in targets]
-
-            # append ground-truth bboxes to propos
-            proposals = self.add_gt_proposals(proposals, gt_boxes)
-
-            # get matching gt indices for each proposal
-            matched_idxs, labels = self.assign_targets_to_proposals(proposals, gt_boxes, gt_labels)
-            # sample a fixed proportion of positive-negative proposals
-            sampled_inds = self.subsample(labels)
-            num_images = len(proposals)
-            for img_id in range(num_images):
-                img_sampled_inds = sampled_inds[img_id]
-                proposals[img_id] = proposals[img_id][img_sampled_inds]
-                labels[img_id] = labels[img_id][img_sampled_inds]
-                matched_idxs[img_id] = matched_idxs[img_id][img_sampled_inds]
+            proposals, matched_idxs, labels, regression_targets = self.select_training_samples(proposals, targets)
 
         box_features = self.box_roi_pool(features, proposals)
         box_features = self.box_head(box_features)
@@ -539,32 +573,11 @@ class RoIHeads(torch.nn.Module):
         result, losses = [], {}
         output = []
         if self.training:
-            regression_targets = []
-            for proposals_per_image, gt_boxes_in_image, matched_idxs_in_image in zip(
-                    proposals, gt_boxes, matched_idxs):
-                matched_gt_boxes = gt_boxes_in_image[matched_idxs_in_image]
-                regression_targets_per_image = self.box_coder.encode(matched_gt_boxes, proposals_per_image)
-                regression_targets.append(regression_targets_per_image)
             loss_classifier, loss_box_reg = fastrcnn_loss(
                 class_logits, box_regression, labels, regression_targets)
             losses = dict(loss_classifier=loss_classifier, loss_box_reg=loss_box_reg)
         else:
-            boxes_per_image = [len(boxes_in_image) for boxes_in_image in proposals]
-
-            concat_proposals = torch.cat(proposals, dim=0)
-            regressed_proposals = self.box_coder.decode(
-                box_regression.view(sum(boxes_per_image), -1), concat_proposals
-            )
-
-            regressed_proposals = regressed_proposals.reshape(sum(boxes_per_image), -1, 4)
-
-            class_prob = F.softmax(class_logits, -1)
-
-            regressed_proposals = regressed_proposals.split(boxes_per_image, 0)
-            class_prob = class_prob.split(boxes_per_image, 0)
-
-            predictions = fastrcnn_filter_proposals(regressed_proposals, class_prob, image_shapes,
-                    self.score_thresh, self.nms_thresh, self.detections_per_img)
+            predictions = self.fastrcnn_predictions(class_logits, box_regression, proposals, image_shapes)
 
             for p, image_shape in zip(predictions, image_shapes):
                 r = {}
@@ -593,6 +606,7 @@ class RoIHeads(torch.nn.Module):
             loss_mask = {}
             if self.training:
                 gt_masks = [t["masks"] for t in targets]
+                gt_labels = [t["labels"] for t in targets]
                 loss_mask = maskrcnn_loss(mask_logits, mask_proposals,
                         gt_masks, gt_labels, mask_matched_idxs, self.mask_discretization_size)
                 loss_mask = dict(loss_mask=loss_mask)
