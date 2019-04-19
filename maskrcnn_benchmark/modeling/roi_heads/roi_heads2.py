@@ -4,20 +4,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchvision.ops import boxes as box_ops
-
-# inference
-from maskrcnn_benchmark.modeling.box_coder import BoxCoder
-
-# StandardRoiHead
-from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import (
-    BalancedPositiveNegativeSampler
-)
-from maskrcnn_benchmark.modeling.matcher import Matcher
-
-# Mask
 from torchvision.ops import misc as misc_nn_ops
-
 from torchvision.ops import roi_align
+
+from maskrcnn_benchmark.modeling.box_coder import BoxCoder
+from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import BalancedPositiveNegativeSampler
+from maskrcnn_benchmark.modeling.matcher import Matcher
 
 
 class TwoMLPHead(nn.Module):

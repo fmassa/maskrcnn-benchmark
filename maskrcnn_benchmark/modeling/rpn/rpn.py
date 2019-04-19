@@ -3,13 +3,11 @@ import torch
 from torch.nn import functional as F
 from torch import nn
 
-from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 from torchvision.ops import boxes as box_ops
 
 from maskrcnn_benchmark.modeling.rpn.utils import concat_box_prediction_layers
-
+from maskrcnn_benchmark.modeling.box_coder import BoxCoder
 from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import BalancedPositiveNegativeSampler
-
 from maskrcnn_benchmark.modeling.matcher import Matcher
 
 
@@ -298,7 +296,6 @@ class RPN(torch.nn.Module):
         )
         return boxes[inds_sorted], objectness
 
-
     def clip_and_nms(self, boxes, objectness, image_size):
         boxlist = box_ops.clip_boxes_to_image(boxes, image_size)
         keep = box_ops.remove_small_boxes(boxes, self.min_size)
@@ -310,27 +307,28 @@ class RPN(torch.nn.Module):
         objectness = objectness[keep]
         return boxes, objectness
 
-    def filter_proposals(self, proposals, objectness, image_shapes, num_anchors):
+    def filter_proposals(self, proposals, objectness, image_shapes, num_anchors_per_level):
         with torch.no_grad():
-            return self._filter_proposals(proposals, objectness, image_shapes, num_anchors)
+            return self._filter_proposals(proposals, objectness, image_shapes, num_anchors_per_level)
 
-    def _filter_proposals(self, proposals, objectness, image_shapes, num_anchors):
-        N = proposals.shape[0]
-        objectness = objectness.reshape(N, -1)
+    def _filter_proposals(self, proposals, objectness, image_shapes, num_anchors_per_level):
+        num_images = proposals.shape[0]
+        num_levels = len(num_anchors_per_level)
+        objectness = objectness.reshape(num_images, -1)
 
-        all_proposals = proposals.split(num_anchors, 1)
-        all_scores = objectness.split(num_anchors, 1)
+        all_proposals = proposals.split(num_anchors_per_level, 1)
+        all_scores = objectness.split(num_anchors_per_level, 1)
 
-        final_result = []
         final_boxes = []
         final_scores = []
-        for proposals, scores in zip(all_proposals, all_scores):
+        for lvl_idx in range(num_levels):
+            proposals = all_proposals[lvl_idx]
+            scores = all_scores[lvl_idx]
             proposals, scores = self.select_top_n_pre_nms(proposals, scores)
-            result = []
             l_boxes = []
             l_scores = []
-            for p, s, im_shape in zip(proposals, scores, image_shapes):
-                p, s = self.clip_and_nms(p, s, im_shape)
+            for img_idx in range(num_images):
+                p, s = self.clip_and_nms(proposals[img_idx], scores[img_idx], image_shapes[img_idx])
                 l_boxes.append(p)
                 l_scores.append(s)
             final_boxes.append(l_boxes)
@@ -340,7 +338,7 @@ class RPN(torch.nn.Module):
         final_scores = list(zip(*final_scores))
         final_boxes = [torch.cat(x) for x in final_boxes]
         final_scores = [torch.cat(x) for x in final_scores]
-        for i in range(len(final_boxes)):
+        for i in range(num_images):
             boxes, scores = self.limit_max_proposals(final_boxes[i], final_scores[i])
             final_boxes[i] = boxes
             final_scores[i] = scores
@@ -372,11 +370,11 @@ class RPN(torch.nn.Module):
         objectness, pred_bbox_deltas = self.head(features)
         anchors = self.anchor_generator(images, features)
 
-        num_anchors = [o[0].numel() for o in objectness]
+        num_anchors_per_level = [o[0].numel() for o in objectness]
         objectness, pred_bbox_deltas = \
                 concat_box_prediction_layers(objectness, pred_bbox_deltas)
         proposals = self.apply_deltas_to_anchors(anchors, pred_bbox_deltas)
-        boxes, scores = self.filter_proposals(proposals, objectness, images.image_sizes, num_anchors)
+        boxes, scores = self.filter_proposals(proposals, objectness, images.image_sizes, num_anchors_per_level)
 
         losses = {}
         if self.training:
