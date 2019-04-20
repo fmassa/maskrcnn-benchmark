@@ -11,30 +11,7 @@ from maskrcnn_benchmark.modeling.balanced_positive_negative_sampler import Balan
 from maskrcnn_benchmark.modeling.matcher import Matcher
 
 
-class BufferList(nn.Module):
-    """
-    Similar to nn.ParameterList, but for buffers
-    """
-
-    def __init__(self, buffers=None):
-        super(BufferList, self).__init__()
-        if buffers is not None:
-            self.extend(buffers)
-
-    def extend(self, buffers):
-        offset = len(self)
-        for i, buffer in enumerate(buffers):
-            self.register_buffer(str(offset + i), buffer)
-        return self
-
-    def __len__(self):
-        return len(self._buffers)
-
-    def __iter__(self):
-        return iter(self._buffers.values())
-
-
-def generate_anchors(base_size, scales, aspect_ratios, device="cpu"):
+def generate_anchors(scales, aspect_ratios, device="cpu"):
     scales = torch.as_tensor(scales, dtype=torch.float32, device=device)
     aspect_ratios = torch.as_tensor(aspect_ratios, dtype=torch.float32, device=device)
     h_ratios = torch.sqrt(aspect_ratios)
@@ -43,9 +20,7 @@ def generate_anchors(base_size, scales, aspect_ratios, device="cpu"):
     ws = (w_ratios[:, None] * scales[None, :]).view(-1)
     hs = (h_ratios[:, None] * scales[None, :]).view(-1)
 
-    base_anchors = torch.stack([
-        base_size - ws, base_size - hs, base_size + ws, base_size + hs
-    ], dim=1) / 2
+    base_anchors = torch.stack([-ws, -hs, ws, hs], dim=1) / 2
     return base_anchors.round()
 
 
@@ -59,34 +34,20 @@ class AnchorGenerator(nn.Module):
         self,
         sizes=(128, 256, 512),
         aspect_ratios=(0.5, 1.0, 2.0),
-        anchor_strides=(8, 16, 32),
     ):
         super(AnchorGenerator, self).__init__()
 
+        if not isinstance(sizes[0], (list, tuple)):
+            # TODO change this
+            sizes = tuple((s,) for s in sizes)
+        if not isinstance(aspect_ratios[0], (list, tuple)):
+            aspect_ratios = (aspect_ratios,) * len(sizes)
 
-        if len(anchor_strides) == 1:
-            anchor_stride = anchor_strides[0]
-            cell_anchors = [
-                generate_anchors(anchor_stride, sizes, aspect_ratios)
-            ]
-        else:
-            if len(anchor_strides) != len(sizes):
-                raise RuntimeError("FPN should have #anchor_strides == #sizes")
-
-            cell_anchors = [
-                generate_anchors(
-                    anchor_stride,
-                    size if isinstance(size, (tuple, list)) else (size,),
-                    aspect_ratios
-                )
-                for anchor_stride, size in zip(anchor_strides, sizes)
-            ]
+        assert len(sizes) == len(aspect_ratios)
 
         self.sizes = sizes
         self.aspect_ratios = aspect_ratios
-        self.strides = anchor_strides
-        self.cell_anchors = BufferList(cell_anchors)
-        # self.cell_anchors = None
+        self.cell_anchors = None
         self._cache = {}
 
     def set_cell_anchors(self, device):
@@ -94,31 +55,31 @@ class AnchorGenerator(nn.Module):
             return self.cell_anchors
         cell_anchors = [
             generate_anchors(
-                anchor_stride,
-                size if isinstance(size, (tuple, list)) else (size,),
-                self.aspect_ratios,
+                sizes,
+                aspect_ratios,
                 device
             )
-            for anchor_stride, size in zip(self.strides, self.sizes)
+            for sizes, aspect_ratios in zip(self.sizes, self.aspect_ratios)
         ]
         self.cell_anchors = cell_anchors
 
     def num_anchors_per_location(self):
-        return [len(cell_anchors) for cell_anchors in self.cell_anchors]
+        return [len(s) * len(a) for s, a in zip(self.sizes, self.aspect_ratios)]
 
-    def grid_anchors(self, grid_sizes):
+    def grid_anchors(self, grid_sizes, strides):
         anchors = []
         for size, stride, base_anchors in zip(
-            grid_sizes, self.strides, self.cell_anchors
+            grid_sizes, strides, self.cell_anchors
         ):
             grid_height, grid_width = size
+            stride_height, stride_width = stride
             device = base_anchors.device
             shifts_x = torch.arange(
-                0, grid_width * stride, step=stride, dtype=torch.float32, device=device
-            )
+                0, grid_width, dtype=torch.float32, device=device
+            ) * stride_width
             shifts_y = torch.arange(
-                0, grid_height * stride, step=stride, dtype=torch.float32, device=device
-            )
+                0, grid_height, dtype=torch.float32, device=device
+            ) * stride_height
             shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x)
             shift_x = shift_x.reshape(-1)
             shift_y = shift_y.reshape(-1)
@@ -130,18 +91,20 @@ class AnchorGenerator(nn.Module):
 
         return anchors
 
-    def cached_grid_anchors(self, grid_sizes):
-        if grid_sizes in self._cache:
-            return self._cache[grid_sizes]
-        anchors = self.grid_anchors(grid_sizes)
-        self._cache[grid_sizes] = anchors
+    def cached_grid_anchors(self, grid_sizes, strides):
+        key = tuple(grid_sizes) + tuple(strides)
+        if key in self._cache:
+            return self._cache[key]
+        anchors = self.grid_anchors(grid_sizes, strides)
+        self._cache[key] = anchors
         return anchors
 
     def forward(self, image_list, feature_maps):
         grid_sizes = tuple([feature_map.shape[-2:] for feature_map in feature_maps])
-        # anchors_over_all_feature_maps = self.grid_anchors(grid_sizes)
-        # self.set_cell_anchors(feature_maps[0].device)
-        anchors_over_all_feature_maps = self.cached_grid_anchors(grid_sizes)
+        image_size = image_list.tensors.shape[-2:]
+        strides = tuple((image_size[0] / g[0], image_size[1] / g[1]) for g in grid_sizes)
+        self.set_cell_anchors(feature_maps[0].device)
+        anchors_over_all_feature_maps = self.cached_grid_anchors(grid_sizes, strides)
         anchors = []
         for i, (image_height, image_width) in enumerate(image_list.image_sizes):
             anchors_in_image = []
@@ -445,7 +408,7 @@ def build_rpn(cfg, in_channels):
     else:
         assert len(anchor_stride) == 1, "Non-FPN should have a single ANCHOR_STRIDE"
     anchor_generator = AnchorGenerator(
-        anchor_sizes, aspect_ratios, anchor_stride
+        anchor_sizes, aspect_ratios
     )
 
     head = RPNHead(
