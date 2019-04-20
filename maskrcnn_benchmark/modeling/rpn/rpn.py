@@ -297,7 +297,7 @@ class RPN(torch.nn.Module):
         return boxes[inds_sorted], objectness
 
     def clip_and_nms(self, boxes, objectness, image_size):
-        boxlist = box_ops.clip_boxes_to_image(boxes, image_size)
+        boxes = box_ops.clip_boxes_to_image(boxes, image_size)
         keep = box_ops.remove_small_boxes(boxes, self.min_size)
         boxes = boxes[keep]
         objectness = objectness[keep]
