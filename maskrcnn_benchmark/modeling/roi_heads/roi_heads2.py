@@ -238,10 +238,10 @@ def project_masks_on_boxes(gt_masks, boxes, matched_idxs, M):
     boxes. This prepares the masks for them to be fed to the
     loss computation as the targets.
     """
-    matched_idxs = matched_idxs.float()
-    device = boxes.device
+    matched_idxs = matched_idxs.to(boxes)
     rois = torch.cat([matched_idxs[:, None], boxes], dim=1)
-    return roi_align(gt_masks[:, None].float(), rois, (M, M), 1)[:, 0]
+    gt_masks = gt_masks[:, None].to(rois)
+    return roi_align(gt_masks, rois, (M, M), 1)[:, 0]
 
 
 def maskrcnn_loss(mask_logits, proposals, gt_masks, gt_labels, mask_matched_idxs, discretization_size):
@@ -583,13 +583,13 @@ class RoIHeads(torch.nn.Module):
             losses = dict(loss_classifier=loss_classifier, loss_box_reg=loss_box_reg)
         else:
             boxes, scores, labels = self.postprocess_detections(class_logits, box_regression, proposals, image_shapes)
-
-            for b, s, l, image_shape in zip(boxes, scores, labels, image_shapes):
+            num_images = len(boxes)
+            for i in range(num_images):
                 r = {}
-                r["boxes"] = b
-                r["labels"] = l
-                r["scores"] = s
-                r["image_size"] = torch.as_tensor(image_shape)
+                r["boxes"] = boxes[i]
+                r["labels"] = labels[i]
+                r["scores"] = scores[i]
+                r["image_size"] = torch.as_tensor(image_shapes[i])
                 result.append(r)
 
         if self.has_mask:
