@@ -94,13 +94,16 @@ def multiclass_nms(boxes, prob, score_thresh, nms_thresh):
     return selected_boxes, selected_scores, selected_labels
 
 def keep_max_detections(boxes, scores, labels, detections_per_img):
-    number_of_detections = len(boxes)
-    # Limit to max_per_image detections **over all classes**
-    if number_of_detections > detections_per_img > 0:
-        scores, keep = torch.topk(scores, detections_per_img, dim=0, sorted=True)
-        boxes = boxes[keep]
-        labels = labels[keep]
+    scores, boxes, labels = select_top_n(scores, detections_per_img, boxes, labels)
     return boxes, scores, labels
+
+def select_top_n(scores, top_n, *args):
+    size = len(scores)
+    assert all(len(x) == size for x in args)
+    if size > top_n > 0:
+        scores, keep = torch.topk(scores, top_n, dim=0)
+        args = tuple(arg[keep] for arg in args)
+    return (scores,) + args
 
 
 def fastrcnn_loss(class_logits, box_regression, labels, regression_targets):
