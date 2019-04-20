@@ -354,7 +354,8 @@ def paste_plenty_of_masks(masks, boxes, im_h, im_w, thresh=0.5):
     # boxes[:, 2:] += 1
     rois = torch.cat((idxs, boxes), dim=1)
     m_h, m_w = masks.shape[-2:]
-    res = _C.roi_align_backward(masks, rois, 1, m_h, m_w, num_boxes, 1, im_h, im_w, 0)
+    sampling_ratio = 0
+    res = _C.roi_align_backward(masks, rois, 1, m_h, m_w, num_boxes, 1, im_h, im_w, sampling_ratio)
     scaling_factor = torch.ceil((boxes[:, 2] - boxes[:, 0]) / m_w) * torch.ceil((boxes[:, 3] - boxes[:, 1]) / m_h)
     res = res * scaling_factor.view(-1, 1, 1, 1)
     if thresh >= 0:
@@ -463,7 +464,6 @@ class RoIHeads(torch.nn.Module):
             match_quality_matrix = self.box_similarity(gt_boxes_per_image, proposals_per_image)
             matched_idxs = self.proposal_matcher(match_quality_matrix)
 
-            # gt_labels_in_image = targets_per_image.get_field("labels")
             labels_per_image = gt_labels_in_image[matched_idxs.clamp(min=0)]
             labels_per_image = labels_per_image.to(dtype=torch.int64)
 

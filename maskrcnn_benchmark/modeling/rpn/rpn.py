@@ -227,13 +227,15 @@ class RPN(torch.nn.Module):
 
     def apply_deltas_to_anchors(self, anchors, pred_bbox_deltas):
         N = len(anchors)
-        with torch.no_grad():
-            boxes_per_image = [len(a) for a in anchors]
-            concat_anchors = torch.cat(anchors, dim=0)
+        # do not backprop through pred_bbox_deltas
+        pred_bbox_deltas = pred_bbox_deltas.detach()
 
-            proposals = self.box_coder.decode(
-                pred_bbox_deltas.view(sum(boxes_per_image), -1), concat_anchors
-            )
+        boxes_per_image = [len(a) for a in anchors]
+        concat_anchors = torch.cat(anchors, dim=0)
+
+        proposals = self.box_coder.decode(
+            pred_bbox_deltas.view(sum(boxes_per_image), -1), concat_anchors
+        )
         proposals = proposals.view(N, -1, 4)
 
         return proposals
@@ -272,12 +274,10 @@ class RPN(torch.nn.Module):
         return boxes, objectness
 
     def filter_proposals(self, proposals, objectness, image_shapes, num_anchors_per_level):
-        with torch.no_grad():
-            return self._filter_proposals(proposals, objectness, image_shapes, num_anchors_per_level)
-
-    def _filter_proposals(self, proposals, objectness, image_shapes, num_anchors_per_level):
         num_images = proposals.shape[0]
         num_levels = len(num_anchors_per_level)
+        # do not backprop throught objectness
+        objectness = objectness.detach()
         objectness = objectness.reshape(num_images, -1)
 
         all_proposals = proposals.split(num_anchors_per_level, 1)
