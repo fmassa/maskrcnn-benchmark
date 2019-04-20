@@ -134,6 +134,10 @@ def do_coco_evaluation(
             res = evaluate_predictions_on_coco(
                 dataset.coco, coco_results[iou_type], file_path, iou_type
             )
+            if iou_type == "segm":
+                r2 = prepare_for_coco_segmentation(predictions, dataset, 1)
+                print("new code")
+                evaluate_predictions_on_coco(dataset.coco, r2, file_path, iou_type)
             results.update(res)
     logger.info(results)
     check_expected_results(results, expected_results, expected_results_sigma_tol)
@@ -198,11 +202,11 @@ def prepare_for_coco_detection(predictions, dataset):
     return coco_results
 
 
-def prepare_for_coco_segmentation(predictions, dataset):
+def prepare_for_coco_segmentation(predictions, dataset, mode=0):
     import pycocotools.mask as mask_util
     import numpy as np
 
-    masker = Masker(threshold=0.5, padding=1)
+    masker = Masker(threshold=0.5, padding=1, mode=mode)
     # assert isinstance(dataset, COCODataset)
     coco_results = []
     for image_id, prediction in tqdm(enumerate(predictions)):

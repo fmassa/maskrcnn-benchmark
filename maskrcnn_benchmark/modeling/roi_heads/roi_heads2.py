@@ -343,6 +343,23 @@ def paste_mask_in_image(mask, box, im_h, im_w, thresh=0.5, padding=1):
     ]
     return im_mask
 
+from torchvision import _C
+def paste_plenty_of_masks(masks, boxes, im_h, im_w, thresh=0.5):
+    device = boxes.device
+    dtype = boxes.dtype
+    masks = masks.to(boxes)
+    num_boxes = len(boxes)
+    idxs = torch.arange(num_boxes, dtype=dtype, device=device)[:, None]
+    boxes = boxes.clone()
+    # boxes[:, 2:] += 1
+    rois = torch.cat((idxs, boxes), dim=1)
+    m_h, m_w = masks.shape[-2:]
+    res = _C.roi_align_backward(masks, rois, 1, m_h, m_w, num_boxes, 1, im_h, im_w, 0)
+    scaling_factor = torch.ceil((boxes[:, 2] - boxes[:, 0]) / m_w) * torch.ceil((boxes[:, 3] - boxes[:, 1]) / m_h)
+    res = res * scaling_factor.view(-1, 1, 1, 1)
+    if thresh >= 0:
+        res = res > thresh
+    return res
 
 class Masker(object):
     """
@@ -350,13 +367,16 @@ class Masker(object):
     specified by the bounding boxes
     """
 
-    def __init__(self, threshold=0.5, padding=1):
+    def __init__(self, threshold=0.5, padding=1, mode=0):
         self.threshold = threshold
         self.padding = padding
+        self.mode = mode
 
     def forward_single_image(self, masks, prediction):
         # boxes = boxes.convert("xyxy")
         im_h, im_w = prediction["image_size"].tolist()
+        if self.mode == 1:
+            return paste_plenty_of_masks(masks, prediction["boxes"], im_h, im_w, self.threshold)
         res = [
             paste_mask_in_image(mask[0], box, im_h, im_w, self.threshold, self.padding)
             for mask, box in zip(masks, prediction["boxes"])
