@@ -97,13 +97,8 @@ def keep_max_detections(boxes, scores, labels, detections_per_img):
     number_of_detections = len(boxes)
     # Limit to max_per_image detections **over all classes**
     if number_of_detections > detections_per_img > 0:
-        image_thresh, _ = torch.kthvalue(
-            scores.cpu(), number_of_detections - detections_per_img + 1
-        )
-        keep = scores >= image_thresh.item()
-        keep = torch.nonzero(keep).squeeze(1)
+        scores, keep = torch.topk(scores, detections_per_img, dim=0, sorted=True)
         boxes = boxes[keep]
-        scores = scores[keep]
         labels = labels[keep]
     return boxes, scores, labels
 
