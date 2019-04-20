@@ -302,7 +302,8 @@ class RPN(torch.nn.Module):
         boxes = boxes[keep]
         objectness = objectness[keep]
 
-        keep = box_ops.nms(boxes, objectness, self.post_nms_top_n)
+        keep = box_ops.nms(boxes, objectness, self.nms_thresh)
+        keep = keep[:self.post_nms_top_n]
         boxes = boxes[keep]
         objectness = objectness[keep]
         return boxes, objectness
