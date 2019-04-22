@@ -251,17 +251,6 @@ class RPN(torch.nn.Module):
             offset += num_anchors
         return torch.cat(r, dim=1)
 
-    def _multilevel_nms(self, boxes, prob, labels):
-        device = boxes.device
-        offsets = labels.to(boxes) * 1500
-        boxes_for_nms = boxes + offsets[:, None]
-
-        keep = box_ops.nms(boxes_for_nms, prob, self.nms_thresh)
-        keep = keep[:self.post_nms_top_n]
-        boxes = boxes[keep]
-        prob = prob[keep]
-        return boxes, prob
-
     def filter_proposals(self, proposals, objectness, image_shapes, num_anchors_per_level):
         num_images = proposals.shape[0]
         num_levels = len(num_anchors_per_level)
@@ -292,7 +281,10 @@ class RPN(torch.nn.Module):
             boxes = boxes[keep]
             scores = scores[keep]
             lvl = lvl[keep]
-            boxes, scores = self._multilevel_nms(boxes, scores, lvl)
+            keep = box_ops.batched_nms(boxes, scores, lvl, self.nms_thresh)
+            keep = keep[:self.post_nms_top_n]
+            boxes = boxes[keep]
+            scores = scores[keep]
             final_boxes.append(boxes)
             final_scores.append(scores)
         return final_boxes, final_scores
