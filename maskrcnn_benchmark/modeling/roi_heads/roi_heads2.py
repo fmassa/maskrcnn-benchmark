@@ -26,9 +26,6 @@ class TwoMLPHead(nn.Module):
         self.fc6 = nn.Linear(in_channels, representation_size)
         self.fc7 = nn.Linear(representation_size, representation_size)
         self.out_channels = representation_size
-        for fc in self.children():
-            nn.init.kaiming_uniform_(fc.weight, a=1)
-            nn.init.constant_(fc.bias, 0)
 
     def forward(self, x):
         x = x.view(x.size(0), -1)
@@ -47,11 +44,6 @@ class FastRCNNPredictor(nn.Module):
         self.cls_score = nn.Linear(representation_size, num_classes)
         num_bbox_reg_classes = 2 if cls_agnostic_bbox_reg else num_classes
         self.bbox_pred = nn.Linear(representation_size, num_bbox_reg_classes * 4)
-
-        nn.init.normal_(self.cls_score.weight, std=0.01)
-        nn.init.normal_(self.bbox_pred.weight, std=0.001)
-        for l in [self.cls_score, self.bbox_pred]:
-            nn.init.constant_(l.bias, 0)
 
     def forward(self, x):
         if x.ndimension() == 4:
@@ -167,7 +159,6 @@ class MaskRCNNHeads(nn.ModuleDict):
             nn.init.kaiming_normal_(
                 conv.weight, mode="fan_out", nonlinearity="relu"
             )
-            nn.init.constant_(conv.bias, 0)
             self[layer_name] = conv
             next_feature = layer_features
         self.out_channels = layer_features
@@ -188,9 +179,7 @@ class MaskRCNNC4Predictor(nn.Module):
         self.mask_fcn_logits = misc_nn_ops.Conv2d(dim_reduced, num_classes, 1, 1, 0)
 
         for name, param in self.named_parameters():
-            if "bias" in name:
-                nn.init.constant_(param, 0)
-            elif "weight" in name:
+            if "weight" in name:
                 # Caffe2 implementation uses MSRAFill, which in fact
                 # corresponds to kaiming_normal_ in PyTorch
                 nn.init.kaiming_normal_(param, mode="fan_out", nonlinearity="relu")
