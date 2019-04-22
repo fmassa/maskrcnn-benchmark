@@ -54,48 +54,38 @@ class FastRCNNPredictor(nn.Module):
 
         return scores, bbox_deltas
 
-def multiclass_nms(boxes, prob, score_thresh, nms_thresh):
+def batched_nms(boxes, scores, idxs, nms_thresh):
+    max_coordinate = boxes.max()
+    offsets = idxs.to(boxes) * (max_coordinate + 1)
+    boxes_for_nms = boxes + offsets[:, None]
+    keep = box_ops.nms(boxes_for_nms, scores, nms_thresh)
+    return keep
+
+def multiclass_nms(boxes, prob, score_thresh, nms_thresh, dets_per_img):
     device = boxes.device
-    selected_boxes = []
-    selected_scores = []
-    selected_labels = []
+    labels = torch.arange(prob.shape[1], device=device)
     # remove predictions with the background label
     prob = prob[:, 1:]
-    boxes= boxes[:, 1:]
-    # split boxes and scores on a per-class list of tensors
-    boxes = boxes.unbind(1)
-    prob = prob.unbind(1)
-    for class_id, (boxes_for_class, prob_for_class) in enumerate(zip(boxes, prob), 1):
-        # remove low scoring boxes
-        inds = torch.nonzero(prob_for_class > score_thresh).squeeze(1)
-        prob_for_class = prob_for_class[inds]
-        boxes_for_class = boxes_for_class[inds]
-        # non-maximum suppression
-        keep = box_ops.nms(boxes_for_class, prob_for_class, nms_thresh)
-        boxes_for_class = boxes_for_class[keep]
-        prob_for_class = prob_for_class[keep]
-        # make label tensor
-        num_boxes = len(boxes_for_class)
-        label = torch.full((num_boxes,), class_id, dtype=torch.int64, device=device)
-        selected_boxes.append(boxes_for_class)
-        selected_scores.append(prob_for_class)
-        selected_labels.append(label)
-    selected_boxes = torch.cat(selected_boxes, dim=0)
-    selected_scores = torch.cat(selected_scores, dim=0)
-    selected_labels = torch.cat(selected_labels, dim=0)
-    return selected_boxes, selected_scores, selected_labels
+    boxes = boxes[:, 1:]
+    labels = labels[1:]
+    labels = labels.view(1, -1).expand_as(prob).flatten()
+    prob = prob.flatten()
+    boxes = boxes.reshape(-1, 4)
 
-def keep_max_detections(boxes, scores, labels, detections_per_img):
-    scores, boxes, labels = select_top_n(scores, detections_per_img, boxes, labels)
-    return boxes, scores, labels
+    # remove low scoring boxes
+    inds = torch.nonzero(prob > score_thresh).squeeze(1)
+    labels = labels[inds]
+    prob = prob[inds]
+    boxes = boxes[inds]
 
-def select_top_n(scores, top_n, *args):
-    size = len(scores)
-    assert all(len(x) == size for x in args)
-    if size > top_n > 0:
-        scores, keep = torch.topk(scores, top_n, dim=0)
-        args = tuple(arg[keep] for arg in args)
-    return (scores,) + args
+    # non-maximum suppression
+    keep = batched_nms(boxes, prob, labels, nms_thresh)
+    keep = keep[:dets_per_img]
+    labels = labels[keep]
+    prob = prob[keep]
+    boxes = boxes[keep]
+
+    return boxes, prob, labels
 
 
 def fastrcnn_loss(class_logits, box_regression, labels, regression_targets):
@@ -548,8 +538,7 @@ class RoIHeads(torch.nn.Module):
         all_labels = []
         for boxes, scores, image_shape in zip(pred_boxes, pred_scores, image_shapes):
             boxes = box_ops.clip_boxes_to_image(boxes, image_shape)
-            boxes, scores, labels = multiclass_nms(boxes, scores, self.score_thresh, self.nms_thresh)
-            boxes, scores, labels = keep_max_detections(boxes, scores, labels, self.detections_per_img)
+            boxes, scores, labels = multiclass_nms(boxes, scores, self.score_thresh, self.nms_thresh, self.detections_per_img)
             all_boxes.append(boxes)
             all_scores.append(scores)
             all_labels.append(labels)

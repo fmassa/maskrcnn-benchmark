@@ -240,74 +240,63 @@ class RPN(torch.nn.Module):
 
         return proposals
 
-    def select_top_n_pre_nms(self, proposals, objectness):
-        N = proposals.shape[0]
-        num_anchors = objectness.shape[1]
-        device = objectness.device
-        pre_nms_top_n = min(self.pre_nms_top_n, num_anchors)
+    def _get_top_n_idx(self, objectness, num_anchors_per_level):
+        r = []
+        offset = 0
+        for ob in objectness.split(num_anchors_per_level, 1):
+            num_anchors = ob.shape[1]
+            pre_nms_top_n = min(self.pre_nms_top_n, num_anchors)
+            _, top_n_idx = ob.topk(pre_nms_top_n, dim=1)
+            r.append(top_n_idx + offset)
+            offset += num_anchors
+        return torch.cat(r, dim=1)
 
-        objectness, topk_idx = objectness.topk(pre_nms_top_n, dim=1, sorted=True)
-        batch_idx = torch.arange(N, device=device)[:, None]
-        proposals = proposals[batch_idx, topk_idx]
-        return proposals, objectness
+    def _multilevel_nms(self, boxes, prob, labels):
+        device = boxes.device
+        offsets = labels.to(boxes) * 1500
+        boxes_for_nms = boxes + offsets[:, None]
 
-    def limit_max_proposals(self, boxes, objectness):
-        num_boxes = len(boxes)
-        post_nms_top_n = min(self.post_nms_top_n, num_boxes)
-        if num_boxes <= post_nms_top_n:
-            return boxes, objectness
-        objectness, inds_sorted = torch.topk(
-            objectness, post_nms_top_n, dim=0, sorted=True
-        )
-        return boxes[inds_sorted], objectness
-
-    def clip_and_nms(self, boxes, objectness, image_size):
-        boxes = box_ops.clip_boxes_to_image(boxes, image_size)
-        keep = box_ops.remove_small_boxes(boxes, self.min_size)
-        boxes = boxes[keep]
-        objectness = objectness[keep]
-
-        keep = box_ops.nms(boxes, objectness, self.nms_thresh)
+        keep = box_ops.nms(boxes_for_nms, prob, self.nms_thresh)
         keep = keep[:self.post_nms_top_n]
         boxes = boxes[keep]
-        objectness = objectness[keep]
-        return boxes, objectness
+        prob = prob[keep]
+        return boxes, prob
 
     def filter_proposals(self, proposals, objectness, image_shapes, num_anchors_per_level):
         num_images = proposals.shape[0]
         num_levels = len(num_anchors_per_level)
+        device = proposals.device
         # do not backprop throught objectness
         objectness = objectness.detach()
         objectness = objectness.reshape(num_images, -1)
 
-        all_proposals = proposals.split(num_anchors_per_level, 1)
-        all_scores = objectness.split(num_anchors_per_level, 1)
+        levels = [torch.full((n,), idx, dtype=torch.int64, device=device) for idx, n in enumerate(num_anchors_per_level)]
+        levels = torch.cat(levels, 0)
+        levels = levels.reshape(1, -1).expand_as(objectness)
+
+        # select top_n before nms
+        top_n_idx = self._get_top_n_idx(objectness, num_anchors_per_level)
+        batch_idx = torch.arange(num_images, device=device)[:, None]
+        objectness = objectness[batch_idx, top_n_idx]
+        levels = levels[batch_idx, top_n_idx]
+        proposals = proposals[batch_idx, top_n_idx]
 
         final_boxes = []
         final_scores = []
-        for lvl_idx in range(num_levels):
-            proposals = all_proposals[lvl_idx]
-            scores = all_scores[lvl_idx]
-            proposals, scores = self.select_top_n_pre_nms(proposals, scores)
-            l_boxes = []
-            l_scores = []
-            for img_idx in range(num_images):
-                p, s = self.clip_and_nms(proposals[img_idx], scores[img_idx], image_shapes[img_idx])
-                l_boxes.append(p)
-                l_scores.append(s)
-            final_boxes.append(l_boxes)
-            final_scores.append(l_scores)
-
-        final_boxes = list(zip(*final_boxes))
-        final_scores = list(zip(*final_scores))
-        final_boxes = [torch.cat(x) for x in final_boxes]
-        final_scores = [torch.cat(x) for x in final_scores]
-        for i in range(num_images):
-            boxes, scores = self.limit_max_proposals(final_boxes[i], final_scores[i])
-            final_boxes[i] = boxes
-            final_scores[i] = scores
-
+        for img_idx in range(num_images):
+            boxes = proposals[img_idx]
+            scores = objectness[img_idx]
+            lvl = levels[img_idx]
+            boxes = box_ops.clip_boxes_to_image(boxes, image_shapes[img_idx])
+            keep = box_ops.remove_small_boxes(boxes, self.min_size)
+            boxes = boxes[keep]
+            scores = scores[keep]
+            lvl = lvl[keep]
+            boxes, scores = self._multilevel_nms(boxes, scores, lvl)
+            final_boxes.append(boxes)
+            final_scores.append(scores)
         return final_boxes, final_scores
+
 
     def map_targets_to_deltas(self, anchors, matched_gt_boxes):
         regression_targets = []
