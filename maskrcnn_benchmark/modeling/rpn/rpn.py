@@ -185,6 +185,18 @@ class RPN(torch.nn.Module):
         self.nms_thresh = nms_thresh
         self.min_size = 0
 
+    @property
+    def pre_nms_top_n(self):
+        if self.training:
+            return self._pre_nms_top_n['training']
+        return self._pre_nms_top_n['testing']
+
+    @property
+    def post_nms_top_n(self):
+        if self.training:
+            return self._post_nms_top_n['training']
+        return self._post_nms_top_n['testing']
+
     def assign_targets_to_anchors(self, anchors, targets):
         labels = []
         matched_gt_boxes = []
@@ -213,33 +225,6 @@ class RPN(torch.nn.Module):
             matched_gt_boxes.append(matched_gt_boxes_per_image)
         return labels, matched_gt_boxes
 
-    @property
-    def pre_nms_top_n(self):
-        if self.training:
-            return self._pre_nms_top_n['training']
-        return self._pre_nms_top_n['testing']
-
-    @property
-    def post_nms_top_n(self):
-        if self.training:
-            return self._post_nms_top_n['training']
-        return self._post_nms_top_n['testing']
-
-    def apply_deltas_to_anchors(self, anchors, pred_bbox_deltas):
-        N = len(anchors)
-        # do not backprop through pred_bbox_deltas
-        pred_bbox_deltas = pred_bbox_deltas.detach()
-
-        boxes_per_image = [len(a) for a in anchors]
-        concat_anchors = torch.cat(anchors, dim=0)
-
-        proposals = self.box_coder.decode(
-            pred_bbox_deltas.view(sum(boxes_per_image), -1), concat_anchors
-        )
-        proposals = proposals.view(N, -1, 4)
-
-        return proposals
-
     def _get_top_n_idx(self, objectness, num_anchors_per_level):
         r = []
         offset = 0
@@ -263,7 +248,7 @@ class RPN(torch.nn.Module):
         levels = torch.cat(levels, 0)
         levels = levels.reshape(1, -1).expand_as(objectness)
 
-        # select top_n before nms
+        # select top_n boxes independently per level before applying nms
         top_n_idx = self._get_top_n_idx(objectness, num_anchors_per_level)
         batch_idx = torch.arange(num_images, device=device)[:, None]
         objectness = objectness[batch_idx, top_n_idx]
@@ -289,14 +274,6 @@ class RPN(torch.nn.Module):
             final_scores.append(scores)
         return final_boxes, final_scores
 
-
-    def map_targets_to_deltas(self, anchors, matched_gt_boxes):
-        regression_targets = []
-        for anchors_per_image, matched_gt_boxes_per_image in zip(anchors, matched_gt_boxes):
-            regression_targets_per_image = self.box_coder.encode(matched_gt_boxes_per_image, anchors_per_image)
-            regression_targets.append(regression_targets_per_image)
-        return regression_targets
-
     def forward(self, images, features, targets=None):
         """
         Arguments:
@@ -315,16 +292,21 @@ class RPN(torch.nn.Module):
         objectness, pred_bbox_deltas = self.head(features)
         anchors = self.anchor_generator(images, features)
 
+        num_images = len(anchors)
         num_anchors_per_level = [o[0].numel() for o in objectness]
         objectness, pred_bbox_deltas = \
                 concat_box_prediction_layers(objectness, pred_bbox_deltas)
-        proposals = self.apply_deltas_to_anchors(anchors, pred_bbox_deltas)
+        # apply pred_bbox_deltas to anchors to obtain the decoded proposals
+        # note that we detach the deltas because Faster R-CNN do not backprop through
+        # the proposals
+        proposals = self.box_coder.decode(pred_bbox_deltas.detach(), anchors)
+        proposals = proposals.view(num_images, -1, 4)
         boxes, scores = self.filter_proposals(proposals, objectness, images.image_sizes, num_anchors_per_level)
 
         losses = {}
         if self.training:
             labels, matched_gt_boxes = self.assign_targets_to_anchors(anchors, targets)
-            regression_targets = self.map_targets_to_deltas(anchors, matched_gt_boxes)
+            regression_targets = self.box_coder.encode(matched_gt_boxes, anchors)
             loss_objectness, loss_rpn_box_reg = rpn_loss(
                     objectness, pred_bbox_deltas, labels, regression_targets, self.fg_bg_sampler)
             losses = {

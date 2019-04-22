@@ -468,33 +468,24 @@ class RoIHeads(torch.nn.Module):
         matched_idxs, labels = self.assign_targets_to_proposals(proposals, gt_boxes, gt_labels)
         # sample a fixed proportion of positive-negative proposals
         sampled_inds = self.subsample(labels)
+        matched_gt_boxes = []
         num_images = len(proposals)
         for img_id in range(num_images):
             img_sampled_inds = sampled_inds[img_id]
             proposals[img_id] = proposals[img_id][img_sampled_inds]
             labels[img_id] = labels[img_id][img_sampled_inds]
             matched_idxs[img_id] = matched_idxs[img_id][img_sampled_inds]
+            matched_gt_boxes.append(gt_boxes[img_id][matched_idxs[img_id]])
 
-        regression_targets = []
-        for proposals_per_image, gt_boxes_in_image, matched_idxs_in_image in zip(
-                proposals, gt_boxes, matched_idxs):
-            matched_gt_boxes = gt_boxes_in_image[matched_idxs_in_image]
-            regression_targets_per_image = self.box_coder.encode(matched_gt_boxes, proposals_per_image)
-            regression_targets.append(regression_targets_per_image)
-
+        regression_targets = self.box_coder.encode(matched_gt_boxes, proposals)
         return proposals, matched_idxs, labels, regression_targets
 
     def postprocess_detections(self, class_logits, box_regression, proposals, image_shapes):
         device = class_logits.device
         num_classes = class_logits.shape[-1]
+
         boxes_per_image = [len(boxes_in_image) for boxes_in_image in proposals]
-
-        concat_proposals = torch.cat(proposals, dim=0)
-        pred_boxes = self.box_coder.decode(
-            box_regression.view(sum(boxes_per_image), -1), concat_proposals
-        )
-
-        pred_boxes = pred_boxes.reshape(sum(boxes_per_image), -1, 4)
+        pred_boxes = self.box_coder.decode(box_regression, proposals)
 
         pred_scores = F.softmax(class_logits, -1)
 
