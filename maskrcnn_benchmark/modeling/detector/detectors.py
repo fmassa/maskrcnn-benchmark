@@ -1,7 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 from .generalized_rcnn import GeneralizedRCNN
 from ..backbone import build_backbone
-from ..rpn.rpn import build_rpn
 
 
 _DETECTION_META_ARCHITECTURES = {"GeneralizedRCNN": GeneralizedRCNN}
@@ -14,6 +13,41 @@ def build_detection_model(cfg):
     roi_heads = build_roi_heads(cfg, backbone.out_channels)
     return meta_arch(backbone, rpn, roi_heads)
 
+
+def build_rpn(cfg, in_channels):
+    """
+    This gives the gist of it. Not super important because it doesn't change as much
+    """
+    from ..rpn.rpn import AnchorGenerator, RPNHead, RPN
+
+    anchor_sizes = cfg.MODEL.RPN.ANCHOR_SIZES
+    aspect_ratios = cfg.MODEL.RPN.ASPECT_RATIOS
+    # anchor_stride = cfg.MODEL.RPN.ANCHOR_STRIDE
+    # straddle_thresh = cfg.MODEL.RPN.STRADDLE_THRESH
+
+    anchor_generator = AnchorGenerator(
+        anchor_sizes, aspect_ratios
+    )
+
+    head = RPNHead(
+        in_channels, anchor_generator.num_anchors_per_location()[0]
+    )
+
+    pre_nms_top_n = dict(training=cfg.MODEL.RPN.PRE_NMS_TOP_N_TRAIN, testing=cfg.MODEL.RPN.PRE_NMS_TOP_N_TEST)
+    post_nms_top_n = dict(training=cfg.MODEL.RPN.POST_NMS_TOP_N_TRAIN, testing=cfg.MODEL.RPN.POST_NMS_TOP_N_TEST)
+    nms_thresh = cfg.MODEL.RPN.NMS_THRESH
+    # min_size = cfg.MODEL.RPN.MIN_SIZE
+
+    fg_iou_thresh = cfg.MODEL.RPN.FG_IOU_THRESHOLD
+    bg_iou_thresh = cfg.MODEL.RPN.BG_IOU_THRESHOLD
+
+    batch_size_per_image = cfg.MODEL.RPN.BATCH_SIZE_PER_IMAGE
+    positive_fraction = cfg.MODEL.RPN.POSITIVE_FRACTION
+
+    return RPN(anchor_generator, head,
+            fg_iou_thresh, bg_iou_thresh,
+            batch_size_per_image, positive_fraction,
+            pre_nms_top_n, post_nms_top_n, nms_thresh)
 
 def build_roi_heads(cfg, in_channels):
     from ..roi_heads.roi_heads2 import TwoMLPHead, FastRCNNPredictor, MaskRCNNHeads, MaskRCNNC4Predictor
