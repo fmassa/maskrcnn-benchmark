@@ -341,6 +341,7 @@ def rpn_loss(objectness, pred_bbox_deltas, labels, regression_targets, fg_bg_sam
     regression_targets = torch.cat(regression_targets, dim=0)
 
     pos = torch.nonzero(labels > 0).squeeze(1)
+    non_discarded = torch.nonzero(labels >= 0).squeeze(1)
 
     box_loss = F.l1_loss(
         # pred_bbox_deltas[sampled_pos_inds],
@@ -348,7 +349,7 @@ def rpn_loss(objectness, pred_bbox_deltas, labels, regression_targets, fg_bg_sam
         pred_bbox_deltas[pos],
         regression_targets[pos],
         reduction="sum",
-    ) / len(labels)# (sampled_inds.numel())
+    ) / len(non_discarded)# (sampled_inds.numel())
 
     objectness_loss = F.binary_cross_entropy_with_logits(
         objectness[sampled_inds], labels[sampled_inds]
