@@ -404,26 +404,28 @@ class RoIHeads(torch.nn.Module):
         self.mask_discretization_size = mask_discretization_size
 
     def assign_targets_to_proposals(self, proposals, gt_boxes, gt_labels):
-        all_matched_idxs = []
+        matched_idxs = []
         labels = []
-        for proposals_per_image, gt_boxes_per_image, gt_labels_in_image in zip(proposals, gt_boxes, gt_labels):
-            match_quality_matrix = self.box_similarity(gt_boxes_per_image, proposals_per_image)
-            matched_idxs = self.proposal_matcher(match_quality_matrix)
+        for proposals_in_image, gt_boxes_in_image, gt_labels_in_image in zip(proposals, gt_boxes, gt_labels):
+            match_quality_matrix = self.box_similarity(gt_boxes_in_image, proposals_in_image)
+            matched_idxs_in_image = self.proposal_matcher(match_quality_matrix)
 
-            labels_per_image = gt_labels_in_image[matched_idxs.clamp(min=0)]
-            labels_per_image = labels_per_image.to(dtype=torch.int64)
+            clamped_matched_idxs_in_image = matched_idxs_in_image.clamp(min=0)
+
+            labels_in_image = gt_labels_in_image[clamped_matched_idxs_in_image]
+            labels_in_image = labels_in_image.to(dtype=torch.int64)
 
             # Label background (below the low threshold)
-            bg_inds = matched_idxs == self.proposal_matcher.BELOW_LOW_THRESHOLD
-            labels_per_image[bg_inds] = 0
+            bg_inds = matched_idxs_in_image == self.proposal_matcher.BELOW_LOW_THRESHOLD
+            labels_in_image[bg_inds] = 0
 
             # Label ignore proposals (between low and high thresholds)
-            ignore_inds = matched_idxs == self.proposal_matcher.BETWEEN_THRESHOLDS
-            labels_per_image[ignore_inds] = -1  # -1 is ignored by sampler
+            ignore_inds = matched_idxs_in_image == self.proposal_matcher.BETWEEN_THRESHOLDS
+            labels_in_image[ignore_inds] = -1  # -1 is ignored by sampler
 
-            all_matched_idxs.append(matched_idxs.clamp(min=0))
-            labels.append(labels_per_image)
-        return all_matched_idxs, labels
+            matched_idxs.append(clamped_matched_idxs_in_image)
+            labels.append(labels_in_image)
+        return matched_idxs, labels
 
     def subsample(self, labels):
         sampled_pos_inds, sampled_neg_inds = self.fg_bg_sampler(labels)
@@ -508,24 +510,20 @@ class RoIHeads(torch.nn.Module):
             scores = scores[:, 1:]
             labels = labels[:, 1:]
 
-            # batch everything
+            # batch everything, by making every class prediction be a separate instance
             boxes = boxes.reshape(-1, 4)
             scores = scores.flatten()
             labels = labels.flatten()
 
             # remove low scoring boxes
             inds = torch.nonzero(scores > self.score_thresh).squeeze(1)
-            boxes = boxes[inds]
-            scores = scores[inds]
-            labels = labels[inds]
+            boxes, scores, labels = boxes[inds], scores[inds], labels[inds]
 
             # non-maximum suppression, independently done per class
             keep = box_ops.batched_nms(boxes, scores, labels, self.nms_thresh)
             # keep only topk scoring predictions
             keep = keep[:self.detections_per_img]
-            boxes = boxes[keep]
-            scores = scores[keep]
-            labels = labels[keep]
+            boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
 
             all_boxes.append(boxes)
             all_scores.append(scores)

@@ -257,22 +257,55 @@ class RPN(torch.nn.Module):
 
         final_boxes = []
         final_scores = []
-        for img_idx in range(num_images):
-            boxes = proposals[img_idx]
-            scores = objectness[img_idx]
-            lvl = levels[img_idx]
-            boxes = box_ops.clip_boxes_to_image(boxes, image_shapes[img_idx])
+        for boxes, scores, lvl, img_shape in zip(proposals, objectness, levels, image_shapes):
+            boxes = box_ops.clip_boxes_to_image(boxes, img_shape)
             keep = box_ops.remove_small_boxes(boxes, self.min_size)
-            boxes = boxes[keep]
-            scores = scores[keep]
-            lvl = lvl[keep]
+            boxes, scores, lvl = boxes[keep], scores[keep], lvl[keep]
+            # non-maximum suppression, independently done per level
             keep = box_ops.batched_nms(boxes, scores, lvl, self.nms_thresh)
+            # keep only topk scoring predictions
             keep = keep[:self.post_nms_top_n]
-            boxes = boxes[keep]
-            scores = scores[keep]
+            boxes, scores = boxes[keep], scores[keep]
             final_boxes.append(boxes)
             final_scores.append(scores)
         return final_boxes, final_scores
+
+    def compute_loss(self, objectness, pred_bbox_deltas, labels, regression_targets):
+        """
+        Arguments:
+            anchors (list[list[BoxList]])
+            objectness (list[Tensor])
+            pred_bbox_deltas (list[Tensor])
+            targets (list[BoxList])
+
+        Returns:
+            objectness_loss (Tensor)
+            box_loss (Tensor
+        """
+
+        sampled_pos_inds, sampled_neg_inds = self.fg_bg_sampler(labels)
+        sampled_pos_inds = torch.nonzero(torch.cat(sampled_pos_inds, dim=0)).squeeze(1)
+        sampled_neg_inds = torch.nonzero(torch.cat(sampled_neg_inds, dim=0)).squeeze(1)
+
+        sampled_inds = torch.cat([sampled_pos_inds, sampled_neg_inds], dim=0)
+
+        objectness = objectness.flatten()
+
+        labels = torch.cat(labels, dim=0)
+        regression_targets = torch.cat(regression_targets, dim=0)
+
+        box_loss = F.l1_loss(
+            pred_bbox_deltas[sampled_pos_inds],
+            regression_targets[sampled_pos_inds],
+            reduction="sum",
+        ) / (sampled_inds.numel())
+
+        objectness_loss = F.binary_cross_entropy_with_logits(
+            objectness[sampled_inds], labels[sampled_inds]
+        )
+
+        return objectness_loss, box_loss
+
 
     def forward(self, images, features, targets=None):
         """
@@ -307,56 +340,13 @@ class RPN(torch.nn.Module):
         if self.training:
             labels, matched_gt_boxes = self.assign_targets_to_anchors(anchors, targets)
             regression_targets = self.box_coder.encode(matched_gt_boxes, anchors)
-            loss_objectness, loss_rpn_box_reg = rpn_loss(
-                    objectness, pred_bbox_deltas, labels, regression_targets, self.fg_bg_sampler)
+            loss_objectness, loss_rpn_box_reg = self.compute_loss(
+                    objectness, pred_bbox_deltas, labels, regression_targets)
             losses = {
                 "loss_objectness": loss_objectness,
                 "loss_rpn_box_reg": loss_rpn_box_reg,
             }
         return boxes, losses
-
-
-def rpn_loss(objectness, pred_bbox_deltas, labels, regression_targets, fg_bg_sampler):
-    """
-    Arguments:
-        anchors (list[list[BoxList]])
-        objectness (list[Tensor])
-        pred_bbox_deltas (list[Tensor])
-        targets (list[BoxList])
-
-    Returns:
-        objectness_loss (Tensor)
-        box_loss (Tensor
-    """
-
-    sampled_pos_inds, sampled_neg_inds = fg_bg_sampler(labels)
-    sampled_pos_inds = torch.nonzero(torch.cat(sampled_pos_inds, dim=0)).squeeze(1)
-    sampled_neg_inds = torch.nonzero(torch.cat(sampled_neg_inds, dim=0)).squeeze(1)
-
-    sampled_inds = torch.cat([sampled_pos_inds, sampled_neg_inds], dim=0)
-
-    objectness = objectness.flatten()
-
-    labels = torch.cat(labels, dim=0)
-    regression_targets = torch.cat(regression_targets, dim=0)
-
-    pos = torch.nonzero(labels > 0).squeeze(1)
-    non_discarded = torch.nonzero(labels >= 0).squeeze(1)
-
-    box_loss = F.l1_loss(
-        # pred_bbox_deltas[sampled_pos_inds],
-        # regression_targets[sampled_pos_inds],
-        pred_bbox_deltas[pos],
-        regression_targets[pos],
-        reduction="sum",
-    ) / len(non_discarded)# (sampled_inds.numel())
-
-    objectness_loss = F.binary_cross_entropy_with_logits(
-        objectness[sampled_inds], labels[sampled_inds]
-    )
-
-    return objectness_loss, box_loss
-
 
 
 def build_rpn(cfg, in_channels):
