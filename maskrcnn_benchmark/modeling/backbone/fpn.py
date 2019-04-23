@@ -51,8 +51,9 @@ class FPN(nn.Module):
         ):
             if not inner_block:
                 continue
-            inner_top_down = F.interpolate(last_inner, scale_factor=2, mode="nearest")
             inner_lateral = inner_block(feature)
+            feat_shape = inner_lateral.shape[-2:]
+            inner_top_down = F.interpolate(last_inner, size=feat_shape, mode="nearest")
             last_inner = inner_lateral + inner_top_down
             results.insert(0, layer_block(last_inner))
 
