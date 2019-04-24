@@ -131,8 +131,8 @@ class COCODataset(torchvision.datasets.coco.CocoDetection):
         img_data = self.coco.imgs[img_id]
         return img_data
 
-    def __len__(self):
-        return 50
+    # def __len__(self):
+    #     return 50
 
 
 from PIL import Image

@@ -22,8 +22,6 @@ def build_rpn(cfg, in_channels):
 
     anchor_sizes = cfg.MODEL.RPN.ANCHOR_SIZES
     aspect_ratios = cfg.MODEL.RPN.ASPECT_RATIOS
-    # anchor_stride = cfg.MODEL.RPN.ANCHOR_STRIDE
-    # straddle_thresh = cfg.MODEL.RPN.STRADDLE_THRESH
 
     anchor_generator = AnchorGenerator(
         anchor_sizes, aspect_ratios

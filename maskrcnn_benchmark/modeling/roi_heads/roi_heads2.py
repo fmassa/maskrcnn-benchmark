@@ -246,6 +246,8 @@ def expand_masks(mask, padding):
     M = mask.shape[-1]
     pad2 = 2 * padding
     scale = float(M + pad2) / M
+    if padding == 0:
+        return mask[:, None], 1
     padded_mask = mask.new_zeros((N, 1, M + pad2, M + pad2))
     padded_mask[:, :, padding:-padding, padding:-padding] = mask
     return padded_mask, scale
@@ -297,6 +299,8 @@ def paste_plenty_of_masks(masks, boxes, im_h, im_w, thresh=0.5):
     num_boxes = len(boxes)
     idxs = torch.arange(num_boxes, dtype=dtype, device=device)[:, None]
     boxes = boxes.clone()
+    # masks, scale = expand_masks(masks, padding=1)
+    # boxes = expand_boxes(boxes, scale)
     # boxes[:, 2:] += 1
     rois = torch.cat((idxs, boxes), dim=1)
     m_h, m_w = masks.shape[-2:]
@@ -532,6 +536,13 @@ class RoIHeads(torch.nn.Module):
         return all_boxes, all_scores, all_labels
 
     def forward(self, features, proposals, image_shapes, targets=None):
+        """
+        Arguments:
+            features (List[Tensor])
+            proposals (List[Tensor[N, 4]])
+            image_shapes (List[Tuple[H, W]])
+            targets (List[Dict])
+        """
         if self.training:
             proposals, matched_idxs, labels, regression_targets = self.select_training_samples(proposals, targets)
 
