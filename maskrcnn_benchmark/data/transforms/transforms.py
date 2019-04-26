@@ -100,6 +100,16 @@ class Resize(object):
         target = target.resize(image.size)
         return image, target
 
+class SquareResize(object):
+    def __init__(self, size):
+        self.size = size[0] if isinstance(size, (list, tuple)) else size
+
+    def __call__(self, image, target):
+        s = (self.size, self.size)
+        image = F.resize(image, s)
+        target = target.resize(s)
+        return image, target
+
 
 class RandomHorizontalFlip(object):
     def __init__(self, prob=0.5):

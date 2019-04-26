@@ -9,11 +9,13 @@ def build_transforms(cfg, is_train=True):
         flip_prob = 0.5  # cfg.INPUT.FLIP_PROB_TRAIN
         # resize = T.RandomResizeCrop(min_size[0], 1.0)
         resize = T.Resize(min_size, max_size)
+        resize = T.SquareResize(min_size)
     else:
         min_size = cfg.INPUT.MIN_SIZE_TEST
         max_size = cfg.INPUT.MAX_SIZE_TEST
         flip_prob = 0
         resize = T.Resize(min_size, max_size)
+        resize = T.SquareResize(min_size)
 
     to_bgr255 = cfg.INPUT.TO_BGR255
     normalize_transform = T.Normalize(
