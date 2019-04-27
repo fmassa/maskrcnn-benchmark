@@ -23,6 +23,9 @@ class Compose(object):
         format_string += "\n)"
         return format_string
 
+BEFORE = 0
+AFTER = 0
+
 class RandomResizeCrop(object):
     def __init__(self, size, scale):
         #  if not isinstance(min_size, (list, tuple)):
@@ -55,10 +58,17 @@ class RandomResizeCrop(object):
         target = target.resize(image.size)
         i, j = self.get_params(target)
         t = target
+        before = len(target)
         image = F.crop(image, j, i, self.size, self.size)
         target = target.crop((i, j, i + self.size, j + self.size))
         keep = target.area() > 0
         target = target[keep]
+        after = len(target)
+
+        #global BEFORE, AFTER
+        #BEFORE += before
+        #AFTER += after
+        #print(before, after, BEFORE, AFTER)
         # print(i, j, self.size, t, target)
         # print(target)
         return image, target
